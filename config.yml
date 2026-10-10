@@ -1,0 +1,48 @@
+# CPA-Auto-Proxy-Test 插件配置示例
+#
+# 将下面的内容合并进 CPA 主配置(config.yaml)的 plugins 段。
+# 插件本身以动态库形式加载: 先把本仓库构建出的
+# CPA-Auto-Proxy-Test.dll / CPA-Auto-Proxy-Test.so / CPA-Auto-Proxy-Test.dylib 放到 plugins 目录
+# (或使用下方 path 的绝对路径), 再按需调整 configs。
+
+plugins:
+  # 插件系统总开关
+  enabled: true
+
+  # 插件动态库搜索目录(相对 CPA 工作目录)
+  dir: "plugins"
+
+  configs:
+    # 键名必须与插件名一致: CPA-Auto-Proxy-Test
+    CPA-Auto-Proxy-Test:
+      # 启用本插件
+      enabled: true
+      # 插件优先级(仅影响插件间顺序)
+      priority: 10
+
+      # ------------------------------------------------------------------
+      # CPA-Auto-Proxy-Test 配置项
+      # ------------------------------------------------------------------
+
+      # 管理的认证文件类型(与 auth 的 type/provider 比较, 不区分大小写)
+      auth-type: "Antigravity"
+
+      # 候选代理列表, 每项一个完整代理 URL
+      # 支持 http://、https://、socks5:// 等 CPA 支持的代理协议
+      proxies:
+        - "http://127.0.0.1:7890"
+        - "socks5://127.0.0.1:7891"
+        # - "http://user:pass@proxy.example.com:8080"
+
+      # 失败响应匹配列表, 每项为:
+      #   - 纯数字: 匹配失败响应的 HTTP 状态码(如 "400")
+      #   - 其他  : 匹配失败响应体的正则表达式
+      # 留空 (列表为空或省略) 则匹配所有失败请求
+      failure-patterns:
+        - "User location is not supported for the API use"
+        - "400"
+        # - "FAILED_PRECONDITION"
+
+      # 近期观测窗口时长(小时), 窗口内成功率权重高于长期成功率
+      window-hours: 24
+

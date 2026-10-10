@@ -1,0 +1,10 @@
+data/*.db
+data/*.db-shm
+data/*.db-wal
+*.h
+*.dll
+*.so
+*.dylib
+.pi-temp/
+build/
+.pi-temp/
