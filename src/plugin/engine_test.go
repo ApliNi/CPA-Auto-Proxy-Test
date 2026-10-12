@@ -84,6 +84,7 @@ func (h *hostStub) fileProxy(t *testing.T, index string) string {
 func baseConfig(t *testing.T, proxies ...string) config.Config {
 	t.Helper()
 	cfg := config.Default()
+	cfg.AuthType = "Antigravity"
 	cfg.Proxies = proxies
 	cfg.FailurePatterns = []string{"400", "User location is not supported"}
 	return cfg
@@ -307,5 +308,85 @@ func TestReconfigureClearsObsoleteProxyFromFile(t *testing.T) {
 	// cred's proxy should now be physically cleared from file
 	if got := host.fileProxy(t, "idx-1"); got != "" {
 		t.Fatalf("file proxy after reconfigure = %q, want empty (cleared)", got)
+	}
+}
+
+func TestHandleUsageDefaultEmptyAuthType(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "cred.json", "idx-1", "Antigravity", "")
+	cfg := config.Default()
+	cfg.Proxies = []string{"http://p1"}
+	cfg.FailurePatterns = []string{"400", "User location is not supported"}
+	engine := newTestEngine(t, cfg, host)
+
+	engine.HandleUsage(usage("idx-1", true, 400, "User location is not supported"))
+	stats := engine.AuthStats("cred-idx-1", 0)
+	if len(stats) != 0 {
+		t.Fatalf("empty AuthType should not record observations, got: %+v", stats)
+	}
+	if got := host.fileProxy(t, "idx-1"); got != "" {
+		t.Fatalf("empty AuthType should not modify file proxy, got: %q", got)
+	}
+}
+
+func TestHandleUsageMultiAuthTypes(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "antigravity.json", "idx-1", "Antigravity", "http://p1")
+	host.addAuth(t, "gemini.json", "idx-2", "Gemini", "http://p1")
+	host.addAuth(t, "claude.json", "idx-3", "Claude", "http://p1")
+
+	cfg := baseConfig(t, "http://p1", "http://p2")
+	cfg.AuthType = "Antigravity, Gemini"
+	engine := newTestEngine(t, cfg, host)
+
+	engine.HandleUsage(usageWithProvider("idx-1", "antigravity", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-1"); got != "http://p2" {
+		t.Fatalf("idx-1 file proxy = %q, want http://p2", got)
+	}
+
+	engine.HandleUsage(usageWithProvider("idx-2", "gemini", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-2"); got != "http://p2" {
+		t.Fatalf("idx-2 file proxy = %q, want http://p2", got)
+	}
+
+	engine.HandleUsage(usageWithProvider("idx-3", "claude", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-3"); got != "http://p1" {
+		t.Fatalf("idx-3 file proxy = %q, want untouched http://p1", got)
+	}
+	if stats := engine.AuthStats("cred-idx-3", 0); len(stats) != 0 {
+		t.Fatalf("unmanaged type recorded observations: %+v", stats)
+	}
+}
+
+func TestCleanupStaleProxiesDefaultEmptyAndMulti(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "anti.json", "idx-1", "Antigravity", "http://stale:8080")
+	host.addAuth(t, "gemini.json", "idx-2", "Gemini", "http://stale:8080")
+	host.addAuth(t, "claude.json", "idx-3", "Claude", "http://stale:8080")
+
+	defaultCfg := config.Default()
+	defaultCfg.Proxies = []string{"http://p1"}
+	_ = newTestEngine(t, defaultCfg, host)
+	if got := host.fileProxy(t, "idx-1"); got != "http://stale:8080" {
+		t.Fatalf("empty AuthType wiped idx-1 proxy: %q", got)
+	}
+	if got := host.fileProxy(t, "idx-2"); got != "http://stale:8080" {
+		t.Fatalf("empty AuthType wiped idx-2 proxy: %q", got)
+	}
+	if got := host.fileProxy(t, "idx-3"); got != "http://stale:8080" {
+		t.Fatalf("empty AuthType wiped idx-3 proxy: %q", got)
+	}
+
+	multiCfg := baseConfig(t, "http://p1")
+	multiCfg.AuthType = "Antigravity, Gemini"
+	_ = newTestEngine(t, multiCfg, host)
+	if got := host.fileProxy(t, "idx-1"); got != "" {
+		t.Fatalf("idx-1 proxy = %q, want empty (cleared)", got)
+	}
+	if got := host.fileProxy(t, "idx-2"); got != "" {
+		t.Fatalf("idx-2 proxy = %q, want empty (cleared)", got)
+	}
+	if got := host.fileProxy(t, "idx-3"); got != "http://stale:8080" {
+		t.Fatalf("idx-3 proxy = %q, want untouched http://stale:8080", got)
 	}
 }

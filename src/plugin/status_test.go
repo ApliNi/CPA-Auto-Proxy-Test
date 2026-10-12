@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,8 @@ func TestStatusSnapshotFields(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Unix()
 
+	engine.RecordObservation("a.json", "http://p1", now-100000, true)
+	engine.RecordObservation("a.json", scorer.DefaultProxy, now-95000, false)
 	engine.RecordObservation("a.json", "http://p1", now-30, true)
 	engine.RecordObservation("a.json", "http://p1", now-20, false)
 	engine.RecordObservation("a.json", scorer.DefaultProxy, now-10, true)
@@ -42,14 +45,16 @@ func TestStatusSnapshotFields(t *testing.T) {
 			FailurePatternsCount int      `json:"failure_patterns_count"`
 		} `json:"config"`
 		Accounts []struct {
-			AuthID       string `json:"auth_id"`
-			AuthIndex    string `json:"auth_index"`
-			Type         string `json:"type"`
-			AppliedProxy string `json:"applied_proxy"`
-			StateProxy   string `json:"state_proxy"`
-			TotalSuccess int64  `json:"total_success"`
-			TotalFailed  int64  `json:"total_failed"`
-			Observations []struct {
+			AuthID        string `json:"auth_id"`
+			AuthIndex     string `json:"auth_index"`
+			Type          string `json:"type"`
+			AppliedProxy  string `json:"applied_proxy"`
+			StateProxy    string `json:"state_proxy"`
+			RecentSuccess int64  `json:"recent_success"`
+			RecentFailed  int64  `json:"recent_failed"`
+			TotalSuccess  int64  `json:"total_success"`
+			TotalFailed   int64  `json:"total_failed"`
+			Observations  []struct {
 				Proxy         string  `json:"proxy"`
 				RecentSuccess int64   `json:"recent_success"`
 				RecentTotal   int64   `json:"recent_total"`
@@ -60,6 +65,13 @@ func TestStatusSnapshotFields(t *testing.T) {
 				LastOK        bool    `json:"last_ok"`
 			} `json:"observations"`
 		} `json:"accounts"`
+		ProxySummaries []struct {
+			Proxy         string `json:"proxy"`
+			TotalSuccess  int64  `json:"total_success"`
+			TotalFailed   int64  `json:"total_failed"`
+			RecentSuccess int64  `json:"recent_success"`
+			RecentFailed  int64  `json:"recent_failed"`
+		} `json:"proxy_summaries"`
 	}
 	if errUnmarshal := json.Unmarshal(raw, &doc); errUnmarshal != nil {
 		t.Fatalf("unmarshal snapshot error = %v", errUnmarshal)
@@ -92,8 +104,11 @@ func TestStatusSnapshotFields(t *testing.T) {
 	if doc.Accounts[a].AppliedProxy != "http://p1" {
 		t.Fatalf("a.json applied_proxy = %q, want http://p1", doc.Accounts[a].AppliedProxy)
 	}
-	if doc.Accounts[a].TotalSuccess != 2 || doc.Accounts[a].TotalFailed != 1 {
-		t.Fatalf("a.json total success/failed = %d/%d, want 2/1", doc.Accounts[a].TotalSuccess, doc.Accounts[a].TotalFailed)
+	if doc.Accounts[a].RecentSuccess != 2 || doc.Accounts[a].RecentFailed != 1 {
+		t.Fatalf("a.json recent success/failed = %d/%d, want 2/1", doc.Accounts[a].RecentSuccess, doc.Accounts[a].RecentFailed)
+	}
+	if doc.Accounts[a].TotalSuccess != 3 || doc.Accounts[a].TotalFailed != 2 {
+		t.Fatalf("a.json total success/failed = %d/%d, want 3/2", doc.Accounts[a].TotalSuccess, doc.Accounts[a].TotalFailed)
 	}
 	proxies := map[string]int{}
 	for i, obs := range doc.Accounts[a].Observations {
@@ -104,10 +119,10 @@ func TestStatusSnapshotFields(t *testing.T) {
 		t.Fatalf("a.json missing http://p1 observation: %+v", doc.Accounts[a].Observations)
 	}
 	p1obs := doc.Accounts[a].Observations[p1]
-	if p1obs.RecentSuccess != 1 || p1obs.RecentTotal != 2 || p1obs.LongSuccess != 1 || p1obs.LongTotal != 2 {
+	if p1obs.RecentSuccess != 1 || p1obs.RecentTotal != 2 || p1obs.LongSuccess != 2 || p1obs.LongTotal != 3 {
 		t.Fatalf("p1 stats = %+v", p1obs)
 	}
-	want := scorer.Score(scorer.Stats{RecentSuccess: 1, RecentTotal: 2, LongSuccess: 1, LongTotal: 2})
+	want := scorer.Score(scorer.Stats{RecentSuccess: 1, RecentTotal: 2, LongSuccess: 2, LongTotal: 3})
 	if p1obs.Score != want {
 		t.Fatalf("p1 score = %v, want %v", p1obs.Score, want)
 	}
@@ -118,7 +133,7 @@ func TestStatusSnapshotFields(t *testing.T) {
 	if !okDef {
 		t.Fatalf("a.json missing default observation: %+v", doc.Accounts[a].Observations)
 	}
-	if doc.Accounts[a].Observations[def].LongTotal != 1 {
+	if doc.Accounts[a].Observations[def].LongTotal != 2 {
 		t.Fatalf("default stats = %+v", doc.Accounts[a].Observations[def])
 	}
 
@@ -129,11 +144,28 @@ func TestStatusSnapshotFields(t *testing.T) {
 	if doc.Accounts[b].StateProxy != "http://p2" {
 		t.Fatalf("b.json state_proxy = %q, want http://p2", doc.Accounts[b].StateProxy)
 	}
+	if doc.Accounts[b].RecentSuccess != 1 || doc.Accounts[b].RecentFailed != 0 {
+		t.Fatalf("b.json recent success/failed = %d/%d, want 1/0", doc.Accounts[b].RecentSuccess, doc.Accounts[b].RecentFailed)
+	}
+	if doc.Accounts[b].TotalSuccess != 1 || doc.Accounts[b].TotalFailed != 0 {
+		t.Fatalf("b.json total success/failed = %d/%d, want 1/0", doc.Accounts[b].TotalSuccess, doc.Accounts[b].TotalFailed)
+	}
 	// p2 is a configured proxy, so a.json carries a zero-count row for it.
 	for _, obs := range doc.Accounts[a].Observations {
 		if obs.Proxy == "http://p2" && (obs.RecentTotal != 0 || obs.LongTotal != 0) {
 			t.Fatalf("a.json p2 row must be zero-count: %+v", obs)
 		}
+	}
+	if len(doc.ProxySummaries) != 2 {
+		t.Fatalf("proxy_summaries len = %d, want 2: %+v", len(doc.ProxySummaries), doc.ProxySummaries)
+	}
+	if doc.ProxySummaries[0].Proxy != "http://p1" || doc.ProxySummaries[0].RecentSuccess != 1 || doc.ProxySummaries[0].RecentFailed != 1 ||
+		doc.ProxySummaries[0].TotalSuccess != 2 || doc.ProxySummaries[0].TotalFailed != 1 {
+		t.Fatalf("p1 summary = %+v, want rec=1/1 tot=2/1", doc.ProxySummaries[0])
+	}
+	if doc.ProxySummaries[1].Proxy != "http://p2" || doc.ProxySummaries[1].RecentSuccess != 0 || doc.ProxySummaries[1].RecentFailed != 0 ||
+		doc.ProxySummaries[1].TotalSuccess != 0 || doc.ProxySummaries[1].TotalFailed != 0 {
+		t.Fatalf("p2 summary = %+v, want all 0", doc.ProxySummaries[1])
 	}
 }
 
@@ -172,6 +204,7 @@ func TestExportDocumentShape(t *testing.T) {
 		} `json:"config"`
 		RecentFailures []FailureRecord `json:"recent_failures"`
 		Events         []Event         `json:"events"`
+		ProxySummaries []ProxySummary  `json:"proxy_summaries"`
 	}
 	if errUnmarshal := json.Unmarshal(raw, &doc); errUnmarshal != nil {
 		t.Fatalf("unmarshal export error = %v", errUnmarshal)
@@ -190,6 +223,9 @@ func TestExportDocumentShape(t *testing.T) {
 	}
 	if len(doc.Events) != 1 || doc.Events[0].Kind != "switch" {
 		t.Fatalf("events = %+v", doc.Events)
+	}
+	if len(doc.ProxySummaries) != 1 || doc.ProxySummaries[0].Proxy != "http://p1" {
+		t.Fatalf("export proxy_summaries = %+v", doc.ProxySummaries)
 	}
 }
 
@@ -271,5 +307,151 @@ func TestHandleUsageRecordsEvents(t *testing.T) {
 	}
 	if events[0].AuthID != "cred-idx-1" {
 		t.Fatalf("switch event auth_id = %q, want cred-idx-1", events[0].AuthID)
+	}
+}
+
+func TestStatusPageHTMLContract(t *testing.T) {
+	page := StatusPageHTML()
+	if len(page) == 0 {
+		t.Fatal("StatusPageHTML returned empty string")
+	}
+
+	requiredSubstrings := []string{
+		"<!DOCTYPE html>",
+		"CPA-Auto-Proxy-Test 代理路由状态",
+		"/v0/resource/plugins/cpa-auto-proxy-test",
+		"downloadExport",
+		"proxy_summaries",
+		".proxy-item",
+	}
+	for _, req := range requiredSubstrings {
+		if !strings.Contains(page, req) {
+			t.Errorf("StatusPageHTML missing required token: %q", req)
+		}
+	}
+
+	forbiddenSubstrings := []string{
+		"fetch('data'",
+		`fetch("data"`,
+		`<a href="export"`,
+		"Management Key",
+		"key-input",
+		"auth-bar",
+		"auth-form",
+		"saveKey",
+		"clearKey",
+		"已连接",
+		"cli-proxy-auth",
+		"Authorization",
+		"CUSTOM_KEY_STORAGE",
+	}
+	for _, f := range forbiddenSubstrings {
+		if strings.Contains(page, f) {
+			t.Errorf("StatusPageHTML contains forbidden token: %q", f)
+		}
+	}
+}
+
+func TestNotConfiguredHTMLContent(t *testing.T) {
+	page := NotConfiguredHTML()
+	if !strings.Contains(page, "cpa-auto-proxy-test") || !strings.Contains(page, "插件尚未加载配置") {
+		t.Fatalf("NotConfiguredHTML missing expected content: %s", page)
+	}
+}
+
+func TestManagementResponseBuilders(t *testing.T) {
+	jsonResp := JsonManagementResponse(200, []byte(`{"ok":true}`))
+	if jsonResp.StatusCode != 200 {
+		t.Errorf("JsonManagementResponse StatusCode = %d, want 200", jsonResp.StatusCode)
+	}
+	if ct := jsonResp.Headers["Content-Type"]; len(ct) == 0 || !strings.Contains(ct[0], "application/json") {
+		t.Errorf("JsonManagementResponse Content-Type = %v, want application/json", ct)
+	}
+	if string(jsonResp.Body) != `{"ok":true}` {
+		t.Errorf("JsonManagementResponse Body = %q, want {\"ok\":true}", string(jsonResp.Body))
+	}
+
+	htmlResp := HtmlManagementResponse(200, "<html>test</html>")
+	if htmlResp.StatusCode != 200 {
+		t.Errorf("HtmlManagementResponse StatusCode = %d, want 200", htmlResp.StatusCode)
+	}
+	if ct := htmlResp.Headers["Content-Type"]; len(ct) == 0 || !strings.Contains(ct[0], "text/html") {
+		t.Errorf("HtmlManagementResponse Content-Type = %v, want text/html", ct)
+	}
+	if string(htmlResp.Body) != "<html>test</html>" {
+		t.Errorf("HtmlManagementResponse Body = %q, want <html>test</html>", string(htmlResp.Body))
+	}
+}
+func TestProxySummariesMultiAccountAggregation(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "acc1.json", "idx-1", "Antigravity", "")
+	host.addAuth(t, "acc2.json", "idx-2", "Antigravity", "")
+	cfg := baseConfig(t, "http://p1", "http://p2", "http://p3")
+	engine := newTestEngine(t, cfg, host)
+
+	now := time.Now().Unix()
+	// acc1:
+	// p1: 1 historical success (now-100000), 1 recent success (now-10), 1 recent failure (now-5)
+	// => p1 for acc1: recOk=1, recFail=1; totOk=2, totFail=1
+	engine.RecordObservation("acc1.json", "http://p1", now-100000, true)
+	engine.RecordObservation("acc1.json", "http://p1", now-10, true)
+	engine.RecordObservation("acc1.json", "http://p1", now-5, false)
+
+	// p2 for acc1: 2 recent successes
+	// => p2 for acc1: recOk=2, recFail=0; totOk=2, totFail=0
+	engine.RecordObservation("acc1.json", "http://p2", now-20, true)
+	engine.RecordObservation("acc1.json", "http://p2", now-15, true)
+
+	// default proxy for acc1 (must not leak into p1/p2/p3 summaries)
+	engine.RecordObservation("acc1.json", scorer.DefaultProxy, now-10, false)
+
+	// acc2:
+	// p1: 2 recent failures (now-8, now-2)
+	// => p1 for acc2: recOk=0, recFail=2; totOk=0, totFail=2
+	engine.RecordObservation("acc2.json", "http://p1", now-8, false)
+	engine.RecordObservation("acc2.json", "http://p1", now-2, false)
+
+	// p2 for acc2: 1 historical fail (now-100000), 1 recent success (now-1)
+	// => p2 for acc2: recOk=1, recFail=0; totOk=1, totFail=1
+	engine.RecordObservation("acc2.json", "http://p2", now-100000, false)
+	engine.RecordObservation("acc2.json", "http://p2", now-1, true)
+
+	// p3: no observations for either account
+
+	snap, err := engine.StatusSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("StatusSnapshot error = %v", err)
+	}
+
+	if len(snap.ProxySummaries) != 3 {
+		t.Fatalf("expected 3 proxy summaries, got %d", len(snap.ProxySummaries))
+	}
+
+	// p1: acc1(recOk=1, recFail=1, totOk=2, totFail=1) + acc2(recOk=0, recFail=2, totOk=0, totFail=2)
+	// => recOk=1, recFail=3, totOk=2, totFail=3
+	p1 := snap.ProxySummaries[0]
+	if p1.Proxy != "http://p1" || p1.RecentSuccess != 1 || p1.RecentFailed != 3 || p1.TotalSuccess != 2 || p1.TotalFailed != 3 {
+		t.Fatalf("p1 summary unexpected: %+v", p1)
+	}
+
+	// p2: acc1(recOk=2, recFail=0, totOk=2, totFail=0) + acc2(recOk=1, recFail=0, totOk=1, totFail=1)
+	// => recOk=3, recFail=0, totOk=3, totFail=1
+	p2 := snap.ProxySummaries[1]
+	if p2.Proxy != "http://p2" || p2.RecentSuccess != 3 || p2.RecentFailed != 0 || p2.TotalSuccess != 3 || p2.TotalFailed != 1 {
+		t.Fatalf("p2 summary unexpected: %+v", p2)
+	}
+
+	// p3: all 0
+	p3 := snap.ProxySummaries[2]
+	if p3.Proxy != "http://p3" || p3.RecentSuccess != 0 || p3.RecentFailed != 0 || p3.TotalSuccess != 0 || p3.TotalFailed != 0 {
+		t.Fatalf("p3 summary unexpected: %+v", p3)
+	}
+
+	// Empty proxies config test
+	emptyCfg := cfg
+	emptyCfg.Proxies = nil
+	emptySummaries := summarizeProxies(emptyCfg, snap.Accounts)
+	if len(emptySummaries) != 0 {
+		t.Fatalf("expected 0 summaries for empty proxies config, got %d", len(emptySummaries))
 	}
 }

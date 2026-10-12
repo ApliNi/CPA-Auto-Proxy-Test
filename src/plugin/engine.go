@@ -1,4 +1,4 @@
-// Package plugin implements the CPA-Auto-Proxy-Test usage hook: it observes failed
+// Package plugin implements the cpa-auto-proxy-test usage hook: it observes failed
 // requests for the configured credential type, records per-proxy outcomes,
 // and routes credentials to the best available proxy by rewriting the
 // proxy_url member of the credential file.
@@ -79,7 +79,7 @@ func New(cfg config.Config, host HostAPI) (*Engine, error) {
 	// Initial cleanup and sync: scan credentials, purge obsolete proxies
 	// not in the active configuration, and warm up memory state.
 	if errCleanup := engine.Cleanup(context.Background()); errCleanup != nil {
-		engine.host.Log("warn", "CPA-Auto-Proxy-Test: initial cleanup failed: "+errCleanup.Error(), nil)
+		engine.host.Log("warn", "cpa-auto-proxy-test: initial cleanup failed: "+errCleanup.Error(), nil)
 	}
 	engine.mu.Lock()
 	engine.cleanupAtLocked(time.Now())
@@ -137,7 +137,7 @@ func (e *Engine) HandleUsage(record pluginapi.UsageRecord) {
 
 	// CPA 的 UsageRecord.AuthType 是凭证形态(oauth/apikey),
 	// 提供方类型(antigravity)只在 Provider 字段(executor Identifier, 小写)。
-	if !strings.EqualFold(strings.TrimSpace(record.Provider), cfg.AuthType) {
+	if !cfg.MatchesAuthType(record.Provider) {
 		return
 	}
 	if record.Failed && !failMatch.Match(record.Failure.StatusCode, record.Failure.Body) {
@@ -189,7 +189,7 @@ func (e *Engine) HandleUsage(record pluginapi.UsageRecord) {
 	e.mu.Unlock()
 
 	if errSwitch != nil {
-		e.host.Log("error", "CPA-Auto-Proxy-Test: switch proxy failed: "+errSwitch.Error(), map[string]any{"auth_id": authID})
+		e.host.Log("error", "cpa-auto-proxy-test: switch proxy failed: "+errSwitch.Error(), map[string]any{"auth_id": authID})
 		e.AddEvent("error", "switch", authID, "switch proxy failed: "+errSwitch.Error())
 	}
 	if !ok {
@@ -260,7 +260,7 @@ func (e *Engine) switchProxyLocked(authID string, path string, st *authMemorySta
 	st.currentProxy = selected
 	st.updatedAt = time.Now()
 
-	e.host.Log("info", fmt.Sprintf("CPA-Auto-Proxy-Test: switched %s to %s", authID, selected), map[string]any{
+	e.host.Log("info", fmt.Sprintf("cpa-auto-proxy-test: switched %s to %s", authID, selected), map[string]any{
 		"auth_id": authID,
 		"proxy":   selected,
 		"from":    current,
@@ -334,7 +334,7 @@ func (e *Engine) syncAndCleanProxiesLocked(entries []AuthEntry) {
 		if entry.Path == "" || entry.ID == "" {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(entry.Type), e.cfg.AuthType) {
+		if !e.cfg.MatchesAuthType(entry.Type) {
 			continue
 		}
 
@@ -353,7 +353,7 @@ func (e *Engine) syncAndCleanProxiesLocked(entries []AuthEntry) {
 			if !configuredProxies[proxyURL] {
 				// 发现不存在于配置中的废弃/坏代理：物理清除！
 				if errClear := authfile.ClearProxy(entry.Path); errClear != nil {
-					e.host.Log("warn", fmt.Sprintf("CPA-Auto-Proxy-Test: failed to clear obsolete proxy %s from %s: %s", proxyURL, entry.ID, errClear.Error()), nil)
+					e.host.Log("warn", fmt.Sprintf("cpa-auto-proxy-test: failed to clear obsolete proxy %s from %s: %s", proxyURL, entry.ID, errClear.Error()), nil)
 				} else {
 					e.events.Add(Event{
 						TS:      time.Now().Unix(),
@@ -398,7 +398,7 @@ func (e *Engine) runCleanupLoop() {
 				continue
 			}
 			if errCleanup := e.Cleanup(context.Background()); errCleanup != nil {
-				e.host.Log("warn", "CPA-Auto-Proxy-Test: cleanup failed: "+errCleanup.Error(), nil)
+				e.host.Log("warn", "cpa-auto-proxy-test: cleanup failed: "+errCleanup.Error(), nil)
 			} else {
 				e.mu.Lock()
 				e.cleanupAtLocked(now)
@@ -431,7 +431,7 @@ func (e *Engine) authEntries() []AuthEntry {
 	e.mu.Unlock()
 	entries, errList := e.host.AuthList()
 	if errList != nil {
-		e.host.Log("warn", "CPA-Auto-Proxy-Test: list auth files failed: "+errList.Error(), nil)
+		e.host.Log("warn", "cpa-auto-proxy-test: list auth files failed: "+errList.Error(), nil)
 		return nil
 	}
 	e.mu.Lock()

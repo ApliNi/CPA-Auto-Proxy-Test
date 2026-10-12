@@ -1,8 +1,8 @@
-# CPA-Auto-Proxy-Test 插件配置示例
+# cpa-auto-proxy-test 插件配置示例
 #
 # 将下面的内容合并进 CPA 主配置(config.yaml)的 plugins 段。
 # 插件本身以动态库形式加载: 先把本仓库构建出的
-# CPA-Auto-Proxy-Test.dll / CPA-Auto-Proxy-Test.so / CPA-Auto-Proxy-Test.dylib 放到 plugins 目录
+# cpa-auto-proxy-test.dll / cpa-auto-proxy-test.so / cpa-auto-proxy-test.dylib 放到 plugins 目录
 # (或使用下方 path 的绝对路径), 再按需调整 configs。
 
 plugins:
@@ -13,19 +13,20 @@ plugins:
   dir: "plugins"
 
   configs:
-    # 键名必须与插件名一致: CPA-Auto-Proxy-Test
-    CPA-Auto-Proxy-Test:
+    # 键名必须与插件名一致: cpa-auto-proxy-test
+    cpa-auto-proxy-test:
       # 启用本插件
       enabled: true
       # 插件优先级(仅影响插件间顺序)
       priority: 10
 
       # ------------------------------------------------------------------
-      # CPA-Auto-Proxy-Test 配置项
+      # cpa-auto-proxy-test 配置项
       # ------------------------------------------------------------------
 
       # 管理的认证文件类型(与 auth 的 type/provider 比较, 不区分大小写)
-      auth-type: "Antigravity"
+      # 默认为空 (不处理任何凭证以防止意外更改认证文件), 支持以逗号分隔配置多个类型, 例如: "Antigravity,Gemini"
+      auth-type: ""
 
       # 候选代理列表, 每项一个完整代理 URL
       # 支持 http://、https://、socks5:// 等 CPA 支持的代理协议

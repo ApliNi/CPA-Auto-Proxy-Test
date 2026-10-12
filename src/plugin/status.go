@@ -6,7 +6,6 @@ package plugin
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/ApliNi/CPA-Auto-Proxy-Test/src/config"
@@ -15,22 +14,24 @@ import (
 
 // PluginName and PluginVersion identify the plugin in export archives.
 const (
-	PluginName    = "CPA-Auto-Proxy-Test"
+	PluginName    = "cpa-auto-proxy-test"
 	PluginVersion = "0.1.0"
 )
 
 // StatusAccount is one credential with its per-proxy observation statistics.
 type StatusAccount struct {
-	AuthID       string             `json:"auth_id"`
-	AuthIndex    string             `json:"auth_index"`
-	Type         string             `json:"type"`
-	Path         string             `json:"path"`
-	CurrentProxy string             `json:"current_proxy"`
-	AppliedProxy string             `json:"applied_proxy"`
-	StateProxy   string             `json:"state_proxy"`
-	TotalSuccess int64              `json:"total_success"`
-	TotalFailed  int64              `json:"total_failed"`
-	Observations []ProxyObservation `json:"observations"`
+	AuthID        string             `json:"auth_id"`
+	AuthIndex     string             `json:"auth_index"`
+	Type          string             `json:"type"`
+	Path          string             `json:"path"`
+	CurrentProxy  string             `json:"current_proxy"`
+	AppliedProxy  string             `json:"applied_proxy"`
+	StateProxy    string             `json:"state_proxy"`
+	RecentSuccess int64              `json:"recent_success"`
+	RecentFailed  int64              `json:"recent_failed"`
+	TotalSuccess  int64              `json:"total_success"`
+	TotalFailed   int64              `json:"total_failed"`
+	Observations  []ProxyObservation `json:"observations"`
 }
 
 // ProxyObservation holds the scorer statistics for one proxy and credential.
@@ -49,13 +50,24 @@ type ProxyObservation struct {
 	LastOK bool `json:"last_ok"`
 }
 
+// ProxySummary aggregates total and recent success and failure counts across
+// all managed accounts for a single proxy candidate.
+type ProxySummary struct {
+	Proxy         string `json:"proxy"`
+	TotalSuccess  int64  `json:"total_success"`
+	TotalFailed   int64  `json:"total_failed"`
+	RecentSuccess int64  `json:"recent_success"`
+	RecentFailed  int64  `json:"recent_failed"`
+}
+
 // StatusSnapshot is the full state surfaced by the /data endpoint and
 // embedded in the status page.
 type StatusSnapshot struct {
-	GeneratedAt string          `json:"generated_at"`
-	Config      StatusConfig    `json:"config"`
-	Accounts    []StatusAccount `json:"accounts"`
-	Events      []Event         `json:"events"`
+	GeneratedAt    string          `json:"generated_at"`
+	Config         StatusConfig    `json:"config"`
+	Accounts       []StatusAccount `json:"accounts"`
+	Events         []Event         `json:"events"`
+	ProxySummaries []ProxySummary  `json:"proxy_summaries"`
 }
 
 // StatusConfig summarizes the active configuration for display.
@@ -76,6 +88,7 @@ type ExportDocument struct {
 	Accounts       []StatusAccount `json:"accounts"`
 	RecentFailures []FailureRecord `json:"recent_failures"`
 	Events         []Event         `json:"events"`
+	ProxySummaries []ProxySummary  `json:"proxy_summaries"`
 }
 
 // ExportPlugin identifies the exporting plugin.
@@ -100,10 +113,11 @@ func (e *Engine) StatusSnapshot(ctx context.Context) (*StatusSnapshot, error) {
 	windowStart := time.Now().Add(-time.Duration(cfg.WindowHours) * time.Hour).Unix()
 	accounts := e.statusAccounts(cfg, windowStart)
 	return &StatusSnapshot{
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Config:      newStatusConfig(cfg),
-		Accounts:    accounts,
-		Events:      e.events.Snapshot(),
+		GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
+		Config:         newStatusConfig(cfg),
+		Accounts:       accounts,
+		Events:         e.events.Snapshot(),
+		ProxySummaries: summarizeProxies(cfg, accounts),
 	}, nil
 }
 
@@ -127,9 +141,34 @@ func (e *Engine) ExportDocument(ctx context.Context, limit int) (*ExportDocument
 		Accounts:       accounts,
 		RecentFailures: e.failures.Snapshot(limit),
 		Events:         e.events.Snapshot(),
+		ProxySummaries: summarizeProxies(cfg, accounts),
 	}, nil
 }
 
+// summarizeProxies aggregates success and failure statistics across all accounts
+// for each configured proxy, preserving the configuration order.
+func summarizeProxies(cfg config.Config, accounts []StatusAccount) []ProxySummary {
+	summaries := make([]ProxySummary, 0, len(cfg.Proxies))
+	idxMap := make(map[string]int, len(cfg.Proxies))
+	for _, p := range cfg.Proxies {
+		if _, ok := idxMap[p]; ok {
+			continue
+		}
+		idxMap[p] = len(summaries)
+		summaries = append(summaries, ProxySummary{Proxy: p})
+	}
+	for _, acc := range accounts {
+		for _, obs := range acc.Observations {
+			if idx, ok := idxMap[obs.Proxy]; ok {
+				summaries[idx].RecentSuccess += obs.RecentSuccess
+				summaries[idx].RecentFailed += (obs.RecentTotal - obs.RecentSuccess)
+				summaries[idx].TotalSuccess += obs.LongSuccess
+				summaries[idx].TotalFailed += (obs.LongTotal - obs.LongSuccess)
+			}
+		}
+	}
+	return summaries
+}
 func newStatusConfig(cfg config.Config) StatusConfig {
 	return StatusConfig{
 		AuthType:             cfg.AuthType,
@@ -147,7 +186,7 @@ func (e *Engine) statusAccounts(cfg config.Config, windowStart int64) []StatusAc
 		if entry.RuntimeOnly || entry.Path == "" || entry.ID == "" {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(entry.Type), cfg.AuthType) {
+		if !cfg.MatchesAuthType(entry.Type) {
 			continue
 		}
 
@@ -162,23 +201,27 @@ func (e *Engine) statusAccounts(cfg config.Config, windowStart int64) []StatusAc
 		observations := e.statusObservations(cfg, current, stats, st)
 		e.mu.Unlock()
 
-		var totalSuccess, totalFailed int64
+		var recentSuccess, recentFailed, totalSuccess, totalFailed int64
 		for _, obs := range observations {
+			recentSuccess += obs.RecentSuccess
+			recentFailed += (obs.RecentTotal - obs.RecentSuccess)
 			totalSuccess += obs.LongSuccess
 			totalFailed += (obs.LongTotal - obs.LongSuccess)
 		}
 
 		accounts = append(accounts, StatusAccount{
-			AuthID:       entry.ID,
-			AuthIndex:    entry.Index,
-			Type:         entry.Type,
-			Path:         entry.Path,
-			CurrentProxy: current,
-			AppliedProxy: current,
-			StateProxy:   current,
-			TotalSuccess: totalSuccess,
-			TotalFailed:  totalFailed,
-			Observations: observations,
+			AuthID:        entry.ID,
+			AuthIndex:     entry.Index,
+			Type:          entry.Type,
+			Path:          entry.Path,
+			CurrentProxy:  current,
+			AppliedProxy:  current,
+			StateProxy:    current,
+			RecentSuccess: recentSuccess,
+			RecentFailed:  recentFailed,
+			TotalSuccess:  totalSuccess,
+			TotalFailed:   totalFailed,
+			Observations:  observations,
 		})
 	}
 	return accounts
