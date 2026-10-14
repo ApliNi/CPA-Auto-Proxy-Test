@@ -251,7 +251,7 @@ func TestManagementAndUsage(t *testing.T) {
 	if errUnmarshal := json.Unmarshal(mRegEnv.Result, &mResp); errUnmarshal != nil {
 		t.Fatalf("unmarshal management register result: %v", errUnmarshal)
 	}
-	if len(mResp.Routes) != 3 || len(mResp.Resources) != 6 {
+	if len(mResp.Routes) != 3 || len(mResp.Resources) != 2 {
 		t.Fatalf("unexpected routes or resources: %+v", mResp)
 	}
 
@@ -261,13 +261,30 @@ func TestManagementAndUsage(t *testing.T) {
 		wantStatus int
 		wantType   string
 	}{
-		{"mgmt status", "/cpa-auto-proxy-test/status", 200, "application/json"},
-		{"resource status", "/v0/resource/plugins/cpa-auto-proxy-test/status", 200, "application/json"},
-		{"mgmt export", "/cpa-auto-proxy-test/export", 200, "application/json"},
-		{"resource export", "/v0/resource/plugins/cpa-auto-proxy-test/export", 200, "application/json"},
-		{"mgmt page", "/cpa-auto-proxy-test/page", 200, "text/html"},
+		{"mgmt status prefix", "/cpa-auto-proxy-test/status", 200, "application/json"},
+		{"mgmt status v0", "/v0/management/cpa-auto-proxy-test/status", 200, "application/json"},
+		{"mgmt status management prefix", "/management/cpa-auto-proxy-test/status", 200, "application/json"},
+		{"resource status rejected", "/v0/resource/plugins/cpa-auto-proxy-test/status", 404, "application/json"},
+		{"resource status plain rejected", "/resource/plugins/cpa-auto-proxy-test/status", 404, "application/json"},
+		{"resource status uppercase rejected", "/v0/Resource/plugins/cpa-auto-proxy-test/status", 404, "application/json"},
+		{"resource status multi-slash rejected", "//v0/resource/plugins/cpa-auto-proxy-test/status", 404, "application/json"},
+		{"resource status dot-slash rejected", "/v0/resource/plugins/./cpa-auto-proxy-test/status", 404, "application/json"},
+		{"mgmt export prefix", "/cpa-auto-proxy-test/export", 200, "application/json"},
+		{"mgmt export v0", "/v0/management/cpa-auto-proxy-test/export", 200, "application/json"},
+		{"mgmt export management prefix", "/management/cpa-auto-proxy-test/export", 200, "application/json"},
+		{"resource export rejected", "/v0/resource/plugins/cpa-auto-proxy-test/export", 404, "application/json"},
+		{"resource export plain rejected", "/resource/plugins/cpa-auto-proxy-test/export", 404, "application/json"},
+		{"resource export uppercase rejected", "/V0/RESOURCE/plugins/cpa-auto-proxy-test/export", 404, "application/json"},
+		{"resource export multi-slash rejected", "///v0/resource/plugins/cpa-auto-proxy-test/export", 404, "application/json"},
+		{"non-mgmt arbitrary route rejected", "/other/prefix/status", 404, "application/json"},
+		{"mgmt page prefix", "/cpa-auto-proxy-test/page", 200, "text/html"},
+		{"mgmt page v0", "/v0/management/cpa-auto-proxy-test/page", 200, "text/html"},
 		{"resource page", "/v0/resource/plugins/cpa-auto-proxy-test/page", 200, "text/html"},
+		{"resource page uppercase", "/v0/Resource/plugins/cpa-auto-proxy-test/page", 200, "text/html"},
+		{"resource page multi-slash", "//v0/resource/plugins/cpa-auto-proxy-test/page", 200, "text/html"},
 		{"resource root", "/v0/resource/plugins/cpa-auto-proxy-test", 200, "text/html"},
+		{"resource page query string", "/v0/resource/plugins/cpa-auto-proxy-test/page?t=123", 200, "text/html"},
+		{"resource status query string rejected", "/v0/resource/plugins/cpa-auto-proxy-test/status?t=123", 404, "application/json"},
 		{"unknown route", "/cpa-auto-proxy-test/not-exists", 404, ""},
 	}
 
@@ -312,5 +329,100 @@ func TestManagementAndUsage(t *testing.T) {
 	var usageEnv envelope
 	if errUnmarshal := json.Unmarshal(usageRaw, &usageEnv); errUnmarshal != nil || !usageEnv.OK {
 		t.Fatalf("usage handle envelope not ok: %v", errUnmarshal)
+	}
+}
+func TestStaticPageWithoutEngineBranching(t *testing.T) {
+	setupTest(t)
+	// Ensure engine is nil
+	shutdownEngine()
+
+	// 1. Static page via resource route without engine must return 200 StatusPageHTML
+	reqPageResource, _ := json.Marshal(map[string]any{
+		"method": "GET",
+		"path":   "/v0/resource/plugins/cpa-auto-proxy-test/page",
+	})
+	rawPage, errPage := handleMethod(pluginabi.MethodManagementHandle, reqPageResource)
+	if errPage != nil {
+		t.Fatalf("handleMethod page: %v", errPage)
+	}
+	var envPage envelope
+	if err := json.Unmarshal(rawPage, &envPage); err != nil || !envPage.OK {
+		t.Fatalf("page envelope not ok: %v", err)
+	}
+	var respPage plugin.ManagementResponse
+	if err := json.Unmarshal(envPage.Result, &respPage); err != nil {
+		t.Fatalf("unmarshal page resp: %v", err)
+	}
+	if respPage.StatusCode != 200 {
+		t.Fatalf("page status = %d, want 200", respPage.StatusCode)
+	}
+	if string(respPage.Body) != plugin.StatusPageHTML() {
+		t.Fatalf("page body does not match static StatusPageHTML")
+	}
+
+	// 2. Resource status must return 404, not 503, preserving boundary
+	reqResStatus, _ := json.Marshal(map[string]any{
+		"method": "GET",
+		"path":   "/v0/resource/plugins/cpa-auto-proxy-test/status",
+	})
+	rawResStatus, _ := handleMethod(pluginabi.MethodManagementHandle, reqResStatus)
+	var envResStatus envelope
+	_ = json.Unmarshal(rawResStatus, &envResStatus)
+	var respResStatus plugin.ManagementResponse
+	_ = json.Unmarshal(envResStatus.Result, &respResStatus)
+	if respResStatus.StatusCode != 404 {
+		t.Fatalf("resource status without engine = %d, want 404", respResStatus.StatusCode)
+	}
+
+	// 3. Mgmt status returns 503 plugin not configured
+	reqMgmtStatus, _ := json.Marshal(map[string]any{
+		"method": "GET",
+		"path":   "/v0/management/cpa-auto-proxy-test/status",
+	})
+	rawMgmtStatus, _ := handleMethod(pluginabi.MethodManagementHandle, reqMgmtStatus)
+	var envMgmtStatus envelope
+	_ = json.Unmarshal(rawMgmtStatus, &envMgmtStatus)
+	var respMgmtStatus plugin.ManagementResponse
+	_ = json.Unmarshal(envMgmtStatus.Result, &respMgmtStatus)
+	if respMgmtStatus.StatusCode != 503 {
+		t.Fatalf("mgmt status without engine = %d, want 503", respMgmtStatus.StatusCode)
+	}
+}
+
+func TestCleanRoutePathAndExportLimit(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"/v0/resource/plugins/cpa-auto-proxy-test/page", "/v0/resource/plugins/cpa-auto-proxy-test/page"},
+		{"/v0/resource/plugins/./cpa-auto-proxy-test/page", "/v0/resource/plugins/cpa-auto-proxy-test/page"},
+		{"//v0//resource//plugins//page", "/v0/resource/plugins/page"},
+		{"/v0/resource/plugins/page?foo=bar", "/v0/resource/plugins/page"},
+		{"/v0/resource/plugins/page#section", "/v0/resource/plugins/page"},
+		{"resource/page", "/resource/page"},
+	}
+	for _, tc := range cases {
+		got := cleanRoutePath(tc.input)
+		if got != tc.want {
+			t.Errorf("cleanRoutePath(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+
+	limitCases := []struct {
+		query map[string][]string
+		want  int
+	}{
+		{nil, exportLimitDefault},
+		{map[string][]string{"limit": {"10"}}, 10},
+		{map[string][]string{"limit": {"9999"}}, exportLimitMax},
+		{map[string][]string{"limit": {"-5"}}, exportLimitDefault},
+		{map[string][]string{"limit": {"abc"}}, exportLimitDefault},
+		{map[string][]string{"limit": {"", "25"}}, 25},
+	}
+	for _, tc := range limitCases {
+		got := exportLimit(tc.query)
+		if got != tc.want {
+			t.Errorf("exportLimit(%v) = %d, want %d", tc.query, got, tc.want)
+		}
 	}
 }

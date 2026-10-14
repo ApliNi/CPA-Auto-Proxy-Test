@@ -319,7 +319,11 @@ func TestStatusPageHTMLContract(t *testing.T) {
 	requiredSubstrings := []string{
 		"<!DOCTYPE html>",
 		"CPA-Auto-Proxy-Test 代理路由状态",
-		"/v0/resource/plugins/cpa-auto-proxy-test",
+		"/v0/management/cpa-auto-proxy-test",
+		"management_key",
+		"enc::",
+		"Authorization",
+		"X-Management-Key",
 		"downloadExport",
 		"proxy_summaries",
 		".proxy-item",
@@ -331,19 +335,14 @@ func TestStatusPageHTMLContract(t *testing.T) {
 	}
 
 	forbiddenSubstrings := []string{
+		"/v0/resource/plugins/cpa-auto-proxy-test/status",
+		"/v0/resource/plugins/cpa-auto-proxy-test/export",
 		"fetch('data'",
 		`fetch("data"`,
 		`<a href="export"`,
-		"Management Key",
-		"key-input",
-		"auth-bar",
-		"auth-form",
-		"saveKey",
-		"clearKey",
-		"已连接",
-		"cli-proxy-auth",
-		"Authorization",
-		"CUSTOM_KEY_STORAGE",
+		"auth-prompt",
+		"auth-key-input",
+		"saveKeyAndReload",
 	}
 	for _, f := range forbiddenSubstrings {
 		if strings.Contains(page, f) {
@@ -351,7 +350,6 @@ func TestStatusPageHTMLContract(t *testing.T) {
 		}
 	}
 }
-
 func TestNotConfiguredHTMLContent(t *testing.T) {
 	page := NotConfiguredHTML()
 	if !strings.Contains(page, "cpa-auto-proxy-test") || !strings.Contains(page, "插件尚未加载配置") {

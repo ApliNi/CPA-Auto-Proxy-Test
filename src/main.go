@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,12 +196,14 @@ func pluginRegistration(schemaVersion uint32) registration {
 // The host normalizes ManagementRoute paths under /v0/management and
 // ResourceRoute paths under /v0/resource/plugins/<pluginID>.
 //
-// To support both zero-friction independent access (without requiring a
-// Management Key) and authenticated management center operations:
-//   - Resource routes provide unauthenticated browser UI and status/export
-//     endpoints under /v0/resource/plugins/cpa-auto-proxy-test/...
-//   - Management routes provide authenticated endpoints under
-//     /v0/management/cpa-auto-proxy-test/...
+// Resource routes provide unauthenticated browser UI shell only:
+//   - GET /v0/resource/plugins/cpa-auto-proxy-test/page
+//
+// Management routes provide authenticated endpoints protected by the
+// CPA Management Key:
+//   - GET /v0/management/cpa-auto-proxy-test/status
+//   - GET /v0/management/cpa-auto-proxy-test/export
+//   - GET /v0/management/cpa-auto-proxy-test/page
 func managementRegister() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Routes: []pluginapi.ManagementRoute{
@@ -210,11 +213,7 @@ func managementRegister() managementRegistrationResponse {
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{Path: "/page", Menu: "CPA-Auto-Proxy-Test", Description: "代理路由状态"},
-			{Path: "/status", Description: "代理路由状态数据 (免密独立访问)"},
-			{Path: "/export", Description: "代理路由数据导出 (免密独立访问)"},
 			{Path: "/" + pluginIdentifier + "/page", Description: "代理路由状态 (兼容路径)"},
-			{Path: "/" + pluginIdentifier + "/status", Description: "代理路由状态数据 (兼容路径)"},
-			{Path: "/" + pluginIdentifier + "/export", Description: "代理路由数据导出 (兼容路径)"},
 		},
 	}
 }
@@ -271,27 +270,64 @@ func exportLimit(query map[string][]string) int {
 	return limit
 }
 
-func isResourceRoute(path string) bool {
-	return strings.HasPrefix(path, "/v0/resource/") || strings.HasPrefix(path, "/resource/")
+func cleanRoutePath(p string) string {
+	if idx := strings.IndexAny(p, "?#"); idx >= 0 {
+		p = p[:idx]
+	}
+	p = strings.TrimSpace(p)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return path.Clean(p)
+}
+
+func isResourceRoute(cleanPath string) bool {
+	lower := strings.ToLower(cleanPath)
+	return strings.HasPrefix(lower, "/v0/resource/") || strings.HasPrefix(lower, "/resource/")
+}
+
+func isManagementRoute(cleanPath string) bool {
+	lower := strings.ToLower(cleanPath)
+	idPrefix := "/" + strings.ToLower(pluginIdentifier)
+	return strings.HasPrefix(lower, "/v0/management/") ||
+		strings.HasPrefix(lower, "/management/") ||
+		strings.HasPrefix(lower, idPrefix+"/") ||
+		lower == idPrefix
 }
 
 // managementHandle dispatches one Management API or resource request.
 //
-// Both unauthenticated resource routes (/v0/resource/plugins/<id>/...) and
-// authenticated management routes (/v0/management/...) are handled uniformly:
-//   - "page", "index.html", or the plugin ID root serves the status HTML page.
-//   - "status" serves the real-time runtime JSON snapshot.
-//   - "export" serves the full diagnostic export JSON.
+// In compliance with CPA Resource Route Boundary specifications:
+//   - Resource routes (/v0/resource/plugins/<id>/...) only serve the static
+//     HTML shell (e.g. /page, /index.html, or root) without branching on
+//     runtime engine state. Status snapshots and export endpoints are rejected
+//     with 404 to protect sensitive credentials and routing metadata.
+//   - Management routes (/v0/management/<id>/...) serve status and export
+//     under host management key authentication.
 func managementHandle(raw []byte) []byte {
 	req := parseManagementRequest(raw)
-	path := req.Path
-	if idx := strings.IndexAny(path, "?#"); idx >= 0 {
-		path = path[:idx]
-	}
+	cleanPath := cleanRoutePath(req.Path)
 
-	tail := strings.TrimRight(path, "/")
+	tail := strings.TrimRight(cleanPath, "/")
 	if idx := strings.LastIndex(tail, "/"); idx >= 0 {
 		tail = tail[idx+1:]
+	}
+
+	if isResourceRoute(cleanPath) {
+		switch {
+		case strings.EqualFold(tail, "page"),
+			strings.EqualFold(tail, "index.html"),
+			strings.EqualFold(tail, pluginIdentifier),
+			strings.EqualFold(tail, "cpa-auto-proxy-test"),
+			tail == "":
+			return envelopeResponse(plugin.HtmlManagementResponse(http.StatusOK, plugin.StatusPageHTML()))
+		default:
+			return envelopeResponse(plugin.JsonManagementResponse(http.StatusNotFound, []byte(`{"error":"not found"}`)))
+		}
+	}
+
+	if !isManagementRoute(cleanPath) {
+		return envelopeResponse(plugin.JsonManagementResponse(http.StatusNotFound, []byte(`{"error":"not found"}`)))
 	}
 
 	switch {
@@ -300,7 +336,7 @@ func managementHandle(raw []byte) []byte {
 		strings.EqualFold(tail, pluginIdentifier),
 		strings.EqualFold(tail, "cpa-auto-proxy-test"),
 		tail == "":
-		return envelopeResponse(plugin.HtmlManagementResponse(http.StatusOK, statusPageOrPlaceholder()))
+		return envelopeResponse(plugin.HtmlManagementResponse(http.StatusOK, plugin.StatusPageHTML()))
 	case strings.EqualFold(tail, "status"):
 		return envelopeResponse(statusDataResponse())
 	case strings.EqualFold(tail, "export"):
@@ -308,15 +344,6 @@ func managementHandle(raw []byte) []byte {
 	default:
 		return envelopeResponse(plugin.JsonManagementResponse(http.StatusNotFound, []byte(`{"error":"not found"}`)))
 	}
-}
-
-// statusPageOrPlaceholder renders the HTML page, or a placeholder when no
-// configuration has been delivered yet.
-func statusPageOrPlaceholder() string {
-	if currentEngine() == nil {
-		return plugin.NotConfiguredHTML()
-	}
-	return plugin.StatusPageHTML()
 }
 
 // statusDataResponse serves the JSON snapshot from the active engine.

@@ -2,17 +2,22 @@
 // for cpa-auto-proxy-test.
 //
 // The status page is served as a self-contained, passive HTML/JS shell with zero
-// external dependencies. Sensitive runtime metrics and diagnostic exports are
-// fetched via standard plugin resource routes without requiring Management Key
-// authentication:
-//   - GET /v0/resource/plugins/cpa-auto-proxy-test/page
-//   - GET /v0/resource/plugins/cpa-auto-proxy-test/status
-//   - GET /v0/resource/plugins/cpa-auto-proxy-test/export
+// external dependencies. In compliance with CPA Resource Route Boundary policies:
+//   - Static UI shell is served via resource route:
+//     GET /v0/resource/plugins/cpa-auto-proxy-test/page
+//   - Sensitive runtime metrics and diagnostic exports are protected by the CPA
+//     Management Key and accessed via authenticated management routes:
+//     GET /v0/management/cpa-auto-proxy-test/status
+//     GET /v0/management/cpa-auto-proxy-test/export
+//
+// Client-side scripts automatically read the plaintext host management key
+// directly from browser storage (e.g. management_key) without requiring manual
+// key input, and attach Authorization / X-Management-Key headers to management API calls.
 package plugin
 
 // StatusPageHTML renders the static HTML status page shell. Runtime account
 // metrics and diagnostic records are dynamically fetched by client-side script
-// from plugin resource endpoints. Auto-refresh preserves expanded rows by auth ID.
+// from authenticated management endpoints. Auto-refresh preserves expanded rows by auth ID.
 func StatusPageHTML() string {
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -138,13 +143,131 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: .82rem; }
 const REFRESH_MS = 10000;
 const expanded = new Set();
 
-function resolveUrl(endpoint) {
-  const p = window.location.pathname || '';
-  if (p.includes('/resource/plugins/cpa-auto-proxy-test')) {
-    const base = p.replace(/\/(page|index\.html|status|export)(\/.*)?$/, '');
-    return (base || '/v0/resource/plugins/cpa-auto-proxy-test') + '/' + endpoint;
+function isValidKey(k) {
+  if (!k || typeof k !== 'string') return false;
+  const t = k.trim();
+  return t.length > 0 && !t.startsWith('enc::') && t !== 'null' && t !== 'undefined';
+}
+
+function getManagementAuth() {
+  const candidateKeys = ['management_key', 'management-key', 'managementKey', 'cpa_management_key', 'admin_key', 'key'];
+  let key = '';
+  let apiBase = '';
+
+  // 1. 本地存储 (localStorage / sessionStorage) 优先读取明文管理密钥
+  try {
+    for (const k of candidateKeys) {
+      const v = localStorage.getItem(k) || sessionStorage.getItem(k);
+      if (isValidKey(v)) {
+        key = v.trim();
+        break;
+      }
+    }
+  } catch (_) {}
+
+  // 2. iframe 父级窗口跨域/同源穿透读取明文密钥
+  if (!key) {
+    try {
+      if (window.parent && window.parent !== window) {
+        for (const k of candidateKeys) {
+          const v = window.parent.localStorage.getItem(k) || window.parent.sessionStorage.getItem(k);
+          if (isValidKey(v)) {
+            key = v.trim();
+            break;
+          }
+        }
+        if (!key) {
+          const pParams = new URLSearchParams(window.parent.location.search);
+          const pKey = pParams.get('key') || pParams.get('management_key') || pParams.get('management-key');
+          if (isValidKey(pKey)) key = pKey.trim();
+        }
+      }
+    } catch (_) {}
   }
-  return '/v0/resource/plugins/cpa-auto-proxy-test/' + endpoint;
+
+  // 3. URL Query 参数查找
+  if (!key) {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const qKey = params.get('key') || params.get('management_key') || params.get('management-key');
+      if (isValidKey(qKey)) key = qKey.trim();
+    } catch (_) {}
+  }
+
+  // 4. 兜底扫描 cli-proxy-auth（严格排除 enc:: 加密串，只采信明文）
+  if (!key) {
+    try {
+      let raw = localStorage.getItem('cli-proxy-auth') || sessionStorage.getItem('cli-proxy-auth');
+      if (!raw && window.parent && window.parent !== window) {
+        raw = window.parent.localStorage.getItem('cli-proxy-auth') || window.parent.sessionStorage.getItem('cli-proxy-auth');
+      }
+      if (raw) {
+        const trimmed = raw.trim();
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+          const obj = JSON.parse(trimmed);
+          const candidate = (obj.managementKey || obj.key || obj.token || '').trim();
+          if (isValidKey(candidate)) {
+            key = candidate;
+          }
+          if (obj.apiBase && typeof obj.apiBase === 'string') {
+            apiBase = obj.apiBase.trim();
+          }
+        } else if (isValidKey(trimmed)) {
+          key = trimmed;
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 提取可能的自定义 apiBase
+  if (!apiBase) {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const qBase = params.get('api_base') || params.get('apiBase');
+      if (qBase && qBase.trim()) apiBase = qBase.trim();
+      else if (window.parent && window.parent !== window) {
+        const pParams = new URLSearchParams(window.parent.location.search);
+        const pBase = pParams.get('api_base') || pParams.get('apiBase');
+        if (pBase && pBase.trim()) apiBase = pBase.trim();
+      }
+      if (!apiBase) {
+        let raw = localStorage.getItem('cli-proxy-auth') || sessionStorage.getItem('cli-proxy-auth');
+        if (!raw && window.parent && window.parent !== window) {
+          raw = window.parent.localStorage.getItem('cli-proxy-auth') || window.parent.sessionStorage.getItem('cli-proxy-auth');
+        }
+        if (raw && raw.trim().startsWith('{')) {
+          const obj = JSON.parse(raw.trim());
+          if (obj.apiBase && typeof obj.apiBase === 'string') apiBase = obj.apiBase.trim();
+        }
+      }
+    } catch (_) {}
+  }
+  return { key, apiBase };
+}
+
+function resolveMgmtUrl(endpoint) {
+  const auth = getManagementAuth();
+  let base = auth.apiBase ? auth.apiBase.replace(/\/+$/, '') : '';
+  if (base) {
+    if (base.endsWith('/v0/management')) {
+      return base + '/cpa-auto-proxy-test/' + endpoint;
+    }
+    if (base.endsWith('/v0')) {
+      return base + '/management/cpa-auto-proxy-test/' + endpoint;
+    }
+    return base + '/v0/management/cpa-auto-proxy-test/' + endpoint;
+  }
+  return '/v0/management/cpa-auto-proxy-test/' + endpoint;
+}
+
+function getAuthHeaders() {
+  const auth = getManagementAuth();
+  const headers = { 'Accept': 'application/json' };
+  if (auth.key) {
+    headers['Authorization'] = 'Bearer ' + auth.key;
+    headers['X-Management-Key'] = auth.key;
+  }
+  return headers;
 }
 
 function esc(s) {
@@ -267,10 +390,13 @@ function render(data) {
 async function load() {
   const errorEl = document.getElementById('error');
   try {
-    const resp = await fetch(resolveUrl('status'), {
-      headers: { 'Accept': 'application/json' }
+    const resp = await fetch(resolveMgmtUrl('status'), {
+      headers: getAuthHeaders()
     });
     if (!resp.ok) {
+      if (resp.status === 401 || resp.status === 403) {
+        throw new Error('未授权 (HTTP ' + resp.status + ')，请检查 CPA 管理面板登录状态');
+      }
       throw new Error('HTTP ' + resp.status);
     }
     errorEl.textContent = '';
@@ -288,10 +414,13 @@ async function downloadExport() {
     btn.textContent = '正在导出...';
   }
   try {
-    const resp = await fetch(resolveUrl('export?limit=50'), {
-      headers: { 'Accept': 'application/json' }
+    const resp = await fetch(resolveMgmtUrl('export?limit=50'), {
+      headers: getAuthHeaders()
     });
     if (!resp.ok) {
+      if (resp.status === 401 || resp.status === 403) {
+        throw new Error('未授权 (HTTP ' + resp.status + ')，请检查 CPA 管理面板登录状态');
+      }
       throw new Error('HTTP ' + resp.status);
     }
     const blob = await resp.blob();

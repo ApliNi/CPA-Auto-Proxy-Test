@@ -1,5 +1,5 @@
 // Status snapshot construction for the Management API status page and the
-// /data and /export endpoints. The snapshot reads credential entries, the
+// /status and /export endpoints. The snapshot reads credential entries, the
 // in-memory observation state, and the event ring buffer without mutating
 // engine state, so it is safe to serve while HandleUsage runs concurrently.
 package plugin
@@ -60,7 +60,7 @@ type ProxySummary struct {
 	RecentFailed  int64  `json:"recent_failed"`
 }
 
-// StatusSnapshot is the full state surfaced by the /data endpoint and
+// StatusSnapshot is the full state surfaced by the /status endpoint and
 // embedded in the status page.
 type StatusSnapshot struct {
 	GeneratedAt    string          `json:"generated_at"`

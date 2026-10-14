@@ -46,20 +46,21 @@ plugins:
 
 ## 管理面板 (Web UI)
 
-插件自带管理页面，启动后可在 CPA 管理面板菜单中访问：
-- **Web UI 页面**：
-  - CPA 管理中心菜单：可在 CPA 管理面板菜单列表中直接点击进入
-  - 独立免密直接访问：`GET /v0/resource/plugins/cpa-auto-proxy-test/page`（纯静态原生页面，无需任何鉴权密钥）
-- **数据与导出端点**：
-  - **状态快照**：`GET /v0/resource/plugins/cpa-auto-proxy-test/status`
-  - **数据导出**：`GET /v0/resource/plugins/cpa-auto-proxy-test/export`
-- **数据导出**：支持在界面一键下载诊断数据 JSON（包含最近失败详情与节点切换轨迹）。
-- **完全免密交互**：界面采用纯原生免密独立架构，直接通过同源资源端点实时拉取状态和导出诊断数据，无需配置或依赖任何 Management Key。
-界面提供：
-- 各认证文件的当前生效代理
-- 每个凭证的请求近期与累计成功/失败次数（高亮异常文件）
-- 候选代理汇总统计（各代理在所有凭证下的全局近期与累计成功/失败次数）
-- 点击展开查看各候选代理的近期/累计成功率、平滑分值及最后观测时间
+插件自带管理页面，遵循 CPA 资源路由安全边界规范（`/v0/resource/plugins/...` 仅提供纯静态部署资源）：
+- **Web UI 静态页面外壳**：
+  - CPA 管理中心菜单：可在 CPA 管理面板插件列表中直接点击进入
+  - 静态资源路径：`GET /v0/resource/plugins/cpa-auto-proxy-test/page`（纯静态原生页面外壳，不暴露任何运行时凭据或状态）
+- **受保护管理端点 (Protected Management APIs)**：
+  - **状态快照**：`GET /v0/management/cpa-auto-proxy-test/status`（受 CPA Management Key 保护）
+  - **数据导出**：`GET /v0/management/cpa-auto-proxy-test/export`（受 CPA Management Key 保护）
+- **同源自动鉴权机制**：
+  - 前端静态页面遵循 CPA 插件商店同源规范，自动从浏览器存储（如 `management_key`）优先提取明文管理密钥，携带 `Authorization: Bearer <key>` 与 `X-Management-Key: <key>` 调用管理端点。
+  - 严格排除内部加密格式（如 `enc::` 前缀），零配置即开即用，无需任何手动输入或密钥配置组件。
+- **功能特性**：
+  - 一键导出完整诊断数据 JSON（包含最近失败详情与节点切换轨迹）
+  - 各认证文件的当前生效代理与近期/累计请求统计
+  - 候选代理全局汇总统计（成功/失败率高亮徽标）
+  - 点击折叠行查看各凭证在候选代理上的平滑分值、成功率对比及最后观测时间
 ---
 ## 构建与安装
 
