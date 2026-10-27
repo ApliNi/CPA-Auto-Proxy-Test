@@ -128,6 +128,10 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: .82rem; }
 <body>
 <header>
   <h1>CPA-Auto-Proxy-Test 代理路由状态</h1>
+  <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+    <input type="password" id="mgmtKeyInput" placeholder="管理密钥" style="padding: 3px 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); font-size: .82rem; width: 130px;" onkeydown="if(event.key==='Enter')saveCustomKey()">
+    <button class="link-btn" onclick="saveCustomKey()" style="font-size: .82rem; padding: 2px 6px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-tertiary);">保存密钥</button>
+  </div>
   <span id="generated"></span>
 </header>
 <div id="error"></div>
@@ -185,12 +189,18 @@ function getManagementAuth() {
     } catch (_) {}
   }
 
-  // 3. URL Query 参数查找
+  // 3. URL Query 参数查找并自动持久化
   if (!key) {
     try {
       const params = new URLSearchParams(window.location.search);
       const qKey = params.get('key') || params.get('management_key') || params.get('management-key');
-      if (isValidKey(qKey)) key = qKey.trim();
+      if (isValidKey(qKey)) {
+        key = qKey.trim();
+        try {
+          localStorage.setItem('management_key', key);
+          localStorage.setItem('cpa_management_key', key);
+        } catch (_) {}
+      }
     } catch (_) {}
   }
 
@@ -243,6 +253,17 @@ function getManagementAuth() {
     } catch (_) {}
   }
   return { key, apiBase };
+}
+
+function saveCustomKey() {
+  const input = document.getElementById('mgmtKeyInput');
+  if (input && input.value.trim()) {
+    try {
+      localStorage.setItem('management_key', input.value.trim());
+      localStorage.setItem('cpa_management_key', input.value.trim());
+    } catch (_) {}
+    load();
+  }
 }
 
 function resolveMgmtUrl(endpoint) {
@@ -389,13 +410,18 @@ function render(data) {
 
 async function load() {
   const errorEl = document.getElementById('error');
+  const input = document.getElementById('mgmtKeyInput');
+  if (input && !input.value) {
+    const auth = getManagementAuth();
+    if (auth.key) input.value = auth.key;
+  }
   try {
     const resp = await fetch(resolveMgmtUrl('status'), {
       headers: getAuthHeaders()
     });
     if (!resp.ok) {
       if (resp.status === 401 || resp.status === 403) {
-        throw new Error('未授权 (HTTP ' + resp.status + ')，请检查 CPA 管理面板登录状态');
+        throw new Error('未授权 (HTTP ' + resp.status + ')，请在右上角输入 CPA 管理密钥并保存');
       }
       throw new Error('HTTP ' + resp.status);
     }
