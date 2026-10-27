@@ -158,18 +158,33 @@ function getManagementAuth() {
   let key = '';
   let apiBase = '';
 
-  // 1. 本地存储 (localStorage / sessionStorage) 优先读取明文管理密钥
+  // 1. URL Query 参数查找并自动持久化（最高优先级，支持直接覆盖旧缓存）
   try {
-    for (const k of candidateKeys) {
-      const v = localStorage.getItem(k) || sessionStorage.getItem(k);
-      if (isValidKey(v)) {
-        key = v.trim();
-        break;
-      }
+    const params = new URLSearchParams(window.location.search);
+    const qKey = params.get('key') || params.get('management_key') || params.get('management-key');
+    if (isValidKey(qKey)) {
+      key = qKey.trim();
+      try {
+        localStorage.setItem('management_key', key);
+        localStorage.setItem('cpa_management_key', key);
+      } catch (_) {}
     }
   } catch (_) {}
 
-  // 2. iframe 父级窗口跨域/同源穿透读取明文密钥
+  // 2. 本地存储 (localStorage / sessionStorage) 读取明文管理密钥
+  if (!key) {
+    try {
+      for (const k of candidateKeys) {
+        const v = localStorage.getItem(k) || sessionStorage.getItem(k);
+        if (isValidKey(v)) {
+          key = v.trim();
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 3. iframe 父级窗口跨域/同源穿透读取明文密钥
   if (!key) {
     try {
       if (window.parent && window.parent !== window) {
@@ -185,21 +200,6 @@ function getManagementAuth() {
           const pKey = pParams.get('key') || pParams.get('management_key') || pParams.get('management-key');
           if (isValidKey(pKey)) key = pKey.trim();
         }
-      }
-    } catch (_) {}
-  }
-
-  // 3. URL Query 参数查找并自动持久化
-  if (!key) {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const qKey = params.get('key') || params.get('management_key') || params.get('management-key');
-      if (isValidKey(qKey)) {
-        key = qKey.trim();
-        try {
-          localStorage.setItem('management_key', key);
-          localStorage.setItem('cpa_management_key', key);
-        } catch (_) {}
       }
     } catch (_) {}
   }
@@ -257,13 +257,20 @@ function getManagementAuth() {
 
 function saveCustomKey() {
   const input = document.getElementById('mgmtKeyInput');
-  if (input && input.value.trim()) {
-    try {
-      localStorage.setItem('management_key', input.value.trim());
-      localStorage.setItem('cpa_management_key', input.value.trim());
-    } catch (_) {}
-    load();
-  }
+  if (!input) return;
+  const val = input.value.trim();
+  try {
+    if (val) {
+      if (isValidKey(val)) {
+        localStorage.setItem('management_key', val);
+        localStorage.setItem('cpa_management_key', val);
+      }
+    } else {
+      localStorage.removeItem('management_key');
+      localStorage.removeItem('cpa_management_key');
+    }
+  } catch (_) {}
+  load();
 }
 
 function resolveMgmtUrl(endpoint) {
@@ -411,7 +418,7 @@ function render(data) {
 async function load() {
   const errorEl = document.getElementById('error');
   const input = document.getElementById('mgmtKeyInput');
-  if (input && !input.value) {
+  if (input && document.activeElement !== input && !input.value) {
     const auth = getManagementAuth();
     if (auth.key) input.value = auth.key;
   }
@@ -445,7 +452,7 @@ async function downloadExport() {
     });
     if (!resp.ok) {
       if (resp.status === 401 || resp.status === 403) {
-        throw new Error('未授权 (HTTP ' + resp.status + ')，请检查 CPA 管理面板登录状态');
+        throw new Error('未授权 (HTTP ' + resp.status + ')，请在右上角输入 CPA 管理密钥并保存');
       }
       throw new Error('HTTP ' + resp.status);
     }

@@ -15,7 +15,7 @@ import (
 // PluginName and PluginVersion identify the plugin in export archives.
 const (
 	PluginName    = "cpa-auto-proxy-test"
-	PluginVersion = "0.1.0"
+	PluginVersion = "0.1.3"
 )
 
 // StatusAccount is one credential with its per-proxy observation statistics.

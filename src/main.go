@@ -23,7 +23,7 @@ import (
 
 const pluginIdentifier = "cpa-auto-proxy-test"
 
-var pluginVersion = "0.1.0"
+var pluginVersion = "0.1.3"
 
 type envelope struct {
 	OK     bool            `json:"ok"`

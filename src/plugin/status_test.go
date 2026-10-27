@@ -324,6 +324,8 @@ func TestStatusPageHTMLContract(t *testing.T) {
 		"enc::",
 		"Authorization",
 		"X-Management-Key",
+		"mgmtKeyInput",
+		"saveCustomKey",
 		"downloadExport",
 		"proxy_summaries",
 		".proxy-item",
