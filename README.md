@@ -8,10 +8,15 @@ CLIProxyAPI 插件：自动识别并将不同认证文件的流量路由到可�
 
 ## 工作原理
 
-1. **失败观测**：监听请求使用量记录（`usage_plugin`），当匹配到错误状态码或响应体关键词（如 `User location is not supported`）时触发代理切换。
-2. **平滑评分**：综合 24 小时近期成功率（权重 0.7）与长期成功率（权重 0.3），采用拉普拉斯平滑评分。优先尝试未测节点，全节点故障时自适应轮询重试。
-3. **热更新生效**：仅修改对应凭证 JSON 文件的 `proxy_url` 字段（原子写，不破坏 token 刷新），CPA watcher 自动热加载生效。
-4. **高性能与自愈**：纯内存维护评分与状态，正常请求零磁盘 I/O；启动与配置重载时自动从凭证文件中清理已废弃或移除的坏代理。
+1. **失败观测与智能过滤**：监听请求使用量记录（`usage_plugin`），当匹配到错误状态码或响应体关键词（如 `User location is not supported`）时触发代理切换。留空配置默认自动过滤客户端主动中断的无效错误（如 HTTP 499 / `context canceled`），避免正常业务中断导致误切。
+2. **自适应平滑评分（贝叶斯先验与置信度平滑）**：
+   - 动态置信度加权：近期成功率权重受近期样本量动态平滑调节（0 到 0.7），无近期请求时自动平滑回退至长期指标，彻底消除闲置节点评分虚高问题。
+   - 全局经验先验：自动聚合集群各代理全局观测数据作为经验贝叶斯先验，新凭证未测节点优先调度至全局表现优异的高可用节点，避免全量凭证盲目踩坑。
+3. **故障敏捷熔断与避障切换**：
+   - 严禁原地死锁：节点故障触发切换时强制排除当前故障节点，保障流量立即故障转移（Failover）。
+   - 指数退避冷却：节点发生故障时自动触发冷却倒计时（默认 15s 起步，随连续故障呈指数递增），冷却期内优先将流量调度至健康节点。
+   - 僵尸凭证限频：对全节点彻底不可用的失效凭证自动限频写盘，保护宿主磁盘 I/O 与文件监听器免受刷盘风暴影响。
+4. **热更新生效与内存自愈**：仅修改对应凭证 JSON 文件的 `proxy_url` 字段（原子写，不破坏 token 刷新），CPA watcher 自动热加载生效；纯内存维护评分与状态，正常请求零磁盘 I/O；启动与配置重载时自动从凭证文件中清理已废弃或移除的坏代理。
 
 ---
 
@@ -33,14 +38,18 @@ plugins:
         - "User location is not supported for the API use"
         - "400"
       window-hours: 24
+      min-recent-samples: 5
+      failure-cooldown-sec: 15
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `auth-type` | string | `""` | 受管凭证类型（不区分大小写，支持逗号分隔配置多个类型） |
 | `proxies` | string[] | `[]` | 可选的上游代理节点 URL 列表 |
-| `failure-patterns` | string[] | `[]` | 触发切换的失败规则（正则匹配响应体或纯数字状态码；留空匹配全部失败） |
+| `failure-patterns` | string[] | `[]` | 触发切换的失败规则（正则匹配响应体或纯数字状态码；留空匹配全部失败并自动忽略 499 客户端中断） |
 | `window-hours` | int | `24` | 近期成功率的滑动统计窗口（小时） |
+| `min-recent-samples` | int | `5` | 近期窗口置信度最小样本量，低于此值平滑结合长期指标与全局经验先验 |
+| `failure-cooldown-sec` | int | `15` | 故障节点基础冷却时长（秒），连续故障时指数递增退避 |
 
 ---
 
@@ -86,7 +95,7 @@ plugins:
 go run build.go
 
 # 常用参数：
-go run build.go -version 0.1.0              # 指定 Release 版本号（默认 0.1.0）
+go run build.go -version 0.2.0              # 指定 Release 版本号（默认 0.2.0）
 go run build.go -target windows/amd64        # 单独构建指定目标平台（支持 windows/amd64, windows/arm64, linux/amd64, linux/arm64, darwin/amd64, darwin/arm64）
 go run build.go -target darwin/arm64 -keep  # 单独构建并保留 build/ 目录下已有产物
 go run build.go -no-wsl                      # 禁用 Windows 下自动回退到 WSL 构建
@@ -94,5 +103,5 @@ go run build.go -no-wsl                      # 禁用 Windows 下自动回退到
 
 ### 安装与发布
 
-- **发布到 GitHub Release**：直接将 `build/` 下的 `.zip` 压缩包（如 `cpa-auto-proxy-test_0.1.0_linux_amd64.zip`）和 `checksums.txt` 上传至 GitHub Release 附件即可。
+- **发布到 GitHub Release**：直接将 `build/` 下的 `.zip` 压缩包（如 `cpa-auto-proxy-test_0.2.0_linux_amd64.zip`）和 `checksums.txt` 上传至 GitHub Release 附件即可。
 - **手动安装**：解压对应平台的动态库文件（Windows: `cpa-auto-proxy-test.dll`、Linux: `cpa-auto-proxy-test.so`、macOS: `cpa-auto-proxy-test.dylib`）放入 CPA 的 `plugins/` 目录，配置好 CPA 主配置中的插件段即可。

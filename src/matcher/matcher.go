@@ -54,9 +54,14 @@ func (m *Matcher) Empty() bool {
 }
 
 // Match reports whether the failure status code or body matches any rule.
-// When no rules are configured (Empty() == true), it matches every failure.
+// When no rules are configured (Empty() == true), it matches every failure
+// except client cancellations (HTTP 499 or context canceled) which are client-side
+// aborts rather than upstream proxy failures.
 func (m *Matcher) Match(statusCode int, body string) bool {
 	if m.Empty() {
+		if statusCode == 499 || strings.Contains(strings.ToLower(body), "context canceled") {
+			return false
+		}
 		return true
 	}
 	for _, rule := range m.rules {

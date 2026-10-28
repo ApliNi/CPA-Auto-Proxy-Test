@@ -29,7 +29,7 @@ func TestNewRejectsInvalidRegex(t *testing.T) {
 }
 
 func TestMatchStatusCodeAndBody(t *testing.T) {
-	m, err := New([]string{"400", "User location is not supported"})
+	m, err := New([]string{"400", "User location is not supported", "499"})
 	if err != nil {
 		t.Fatalf("New error = %v", err)
 	}
@@ -41,6 +41,7 @@ func TestMatchStatusCodeAndBody(t *testing.T) {
 	}{
 		{"status match", 400, "anything", true},
 		{"status mismatch", 500, "anything", false},
+		{"explicit 499 match", 499, "context canceled", true},
 		{"body match", 200, `{"message":"User location is not supported for the API use."}`, true},
 		{"body mismatch", 200, "all good", false},
 		{"case sensitive", 200, "user location is not supported", false},
@@ -52,7 +53,7 @@ func TestMatchStatusCodeAndBody(t *testing.T) {
 	}
 }
 
-func TestEmptyMatcherMatchesAllFailures(t *testing.T) {
+func TestEmptyMatcherMatchesAllFailuresExceptClientAborts(t *testing.T) {
 	m, err := New(nil)
 	if err != nil {
 		t.Fatalf("New error = %v", err)
@@ -61,13 +62,25 @@ func TestEmptyMatcherMatchesAllFailures(t *testing.T) {
 		t.Fatal("Empty() = false for nil patterns")
 	}
 	if !m.Match(500, "any failure") {
-		t.Fatal("empty matcher must match all failures")
+		t.Fatal("empty matcher must match 500 failure")
 	}
 	if !m.Match(400, "") {
 		t.Fatal("empty matcher must match 400 failure")
 	}
+	if m.Match(499, "client closed") {
+		t.Fatal("empty matcher must ignore 499 client abort")
+	}
+	if m.Match(0, "Post ... context canceled") {
+		t.Fatal("empty matcher must ignore context canceled")
+	}
+	if m.Match(0, "Client aborted: Context Canceled") {
+		t.Fatal("empty matcher must ignore case-insensitive Context Canceled")
+	}
 	var nilMatcher *Matcher
 	if !nilMatcher.Empty() || !nilMatcher.Match(500, "x") {
-		t.Fatal("nil matcher must be empty and match all failures")
+		t.Fatal("nil matcher must be empty and match 500 failures")
+	}
+	if nilMatcher.Match(499, "") {
+		t.Fatal("nil matcher must ignore 499 client abort")
 	}
 }

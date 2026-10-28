@@ -9,6 +9,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Default parameter values for scheduling and stability.
+const (
+	DefaultWindowHours        = 24
+	DefaultMinRecentSamples   = 5
+	DefaultFailureCooldownSec = 15
+)
+
 // Config holds the cpa-auto-proxy-test plugin settings.
 type Config struct {
 	// AuthType is the credential type (or comma-separated list of types) managed by this plugin (case-insensitive).
@@ -22,13 +29,21 @@ type Config struct {
 	FailurePatterns []string `yaml:"failure-patterns"`
 	// WindowHours is the length of the recent observation window in hours.
 	WindowHours int `yaml:"window-hours"`
+	// MinRecentSamples is the minimum number of observations required inside
+	// the recent window before recent success rate takes full weight (defaults to 5).
+	MinRecentSamples int `yaml:"min-recent-samples"`
+	// FailureCooldownSec is the base cooldown duration in seconds applied to a proxy
+	// after a matching failure, with exponential backoff on consecutive failures (defaults to 15).
+	FailureCooldownSec int `yaml:"failure-cooldown-sec"`
 }
 
 // Default returns the built-in default configuration.
 func Default() Config {
 	return Config{
-		AuthType:    "",
-		WindowHours: 24,
+		AuthType:           "",
+		WindowHours:        DefaultWindowHours,
+		MinRecentSamples:   DefaultMinRecentSamples,
+		FailureCooldownSec: DefaultFailureCooldownSec,
 	}
 }
 
@@ -101,7 +116,13 @@ func Parse(raw []byte) (Config, error) {
 	}
 	cfg.FailurePatterns = patterns
 	if cfg.WindowHours <= 0 {
-		cfg.WindowHours = 24
+		cfg.WindowHours = DefaultWindowHours
+	}
+	if cfg.MinRecentSamples <= 0 {
+		cfg.MinRecentSamples = DefaultMinRecentSamples
+	}
+	if cfg.FailureCooldownSec <= 0 {
+		cfg.FailureCooldownSec = DefaultFailureCooldownSec
 	}
 	return cfg, nil
 }

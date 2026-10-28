@@ -588,7 +588,7 @@ func fatal(err error) {
 
 func main() {
 	pluginID := "cpa-auto-proxy-test"
-	defaultVersion := "0.1.3"
+	defaultVersion := "0.2.0"
 
 	targetFlag := flag.String("target", "all", "target to build (goos/goarch), or \"all\"")
 	versionFlag := flag.String("version", defaultVersion, "plugin release version (without leading v, e.g. 0.1.0)")

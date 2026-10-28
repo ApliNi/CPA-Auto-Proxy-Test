@@ -15,7 +15,7 @@ import (
 // PluginName and PluginVersion identify the plugin in export archives.
 const (
 	PluginName    = "cpa-auto-proxy-test"
-	PluginVersion = "0.1.3"
+	PluginVersion = "0.2.0"
 )
 
 // StatusAccount is one credential with its per-proxy observation statistics.
@@ -169,6 +169,7 @@ func summarizeProxies(cfg config.Config, accounts []StatusAccount) []ProxySummar
 	}
 	return summaries
 }
+
 func newStatusConfig(cfg config.Config) StatusConfig {
 	return StatusConfig{
 		AuthType:             cfg.AuthType,
@@ -256,13 +257,17 @@ func (e *Engine) statusObservations(cfg config.Config, current string, stats map
 			}
 		}
 		stat := stats[proxy]
+		prior := scorer.DefaultPrior
+		if gs, ok := e.globalStats[proxy]; ok && gs.longTotal > 0 {
+			prior = float64(gs.longSuccess+1) / float64(gs.longTotal+2)
+		}
 		observations = append(observations, ProxyObservation{
 			Proxy:         proxy,
 			RecentSuccess: stat.RecentSuccess,
 			RecentTotal:   stat.RecentTotal,
 			LongSuccess:   stat.LongSuccess,
 			LongTotal:     stat.LongTotal,
-			Score:         scorer.Score(stat),
+			Score:         scorer.ScoreWithPrior(stat, prior, cfg.MinRecentSamples),
 			LastSeen:      lastSeen,
 			LastOK:        lastOK,
 		})

@@ -191,6 +191,128 @@ func TestFailureSwitchesToBestScoredProxy(t *testing.T) {
 	}
 }
 
+func TestFailureSwitchesAwayEvenWhenHistoryHigh(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "cred.json", "idx-1", "Antigravity", "http://p1")
+	engine := newTestEngine(t, baseConfig(t, "http://p1", "http://p2"), host)
+	now := time.Now().Unix()
+
+	// http://p1 has 500 successes historically
+	for i := range 500 {
+		engine.RecordObservation("cred-idx-1", "http://p1", now-1000+int64(i), true)
+	}
+	// http://p2 has 5 successes
+	for i := range 5 {
+		engine.RecordObservation("cred-idx-1", "http://p2", now-50+int64(i), true)
+	}
+
+	// Now http://p1 encounters a failure: it must switch to http://p2 instead of self-selecting deadlock
+	engine.HandleUsage(usage("idx-1", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-1"); got != "http://p2" {
+		t.Fatalf("file proxy = %q, want failover to http://p2", got)
+	}
+}
+
+func TestGlobalHealthPriorsGuideUntriedOrder(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "prior-acc.json", "idx-prior", "Antigravity", "")
+	cfg := baseConfig(t, "http://bad-first", "http://good-second")
+	engine := newTestEngine(t, cfg, host)
+
+	// Simulate global observations from other accounts:
+	// http://bad-first has 20 failures
+	// http://good-second has 20 successes
+	now := time.Now().Unix()
+	for i := range 20 {
+		engine.RecordObservation("other-acc.json", "http://bad-first", now-100+int64(i), false)
+		engine.RecordObservation("other-acc.json", "http://good-second", now-100+int64(i), true)
+	}
+
+	// Now prior-acc gets its first success on global default:
+	// Instead of blindly picking http://bad-first in config order, it should pick http://good-second!
+	engine.HandleUsage(usage("idx-prior", false, 0, ""))
+	if got := host.fileProxy(t, "idx-prior"); got != "http://good-second" {
+		t.Fatalf("first proxy selected = %q, want globally high-performing http://good-second", got)
+	}
+}
+
+func TestEmptyFailurePatternsIgnoresClientAbort499(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "cred.json", "idx-1", "Antigravity", "http://p1")
+	cfg := baseConfig(t, "http://p1", "http://p2")
+	cfg.FailurePatterns = nil // empty matches all failures
+	engine := newTestEngine(t, cfg, host)
+
+	// A client abort (499 or context canceled) must NOT trigger a proxy switch
+	engine.HandleUsage(usage("idx-1", true, 499, "client canceled"))
+	if got := host.fileProxy(t, "idx-1"); got != "http://p1" {
+		t.Fatalf("file proxy = %q, want unchanged http://p1 after 499 client abort", got)
+	}
+	if len(engine.failures.Snapshot(10)) != 0 {
+		t.Fatal("client abort 499 should not be recorded in failures")
+	}
+
+	// But a real connection failure (status 0 or 500) DOES trigger switch
+	engine.HandleUsage(usage("idx-1", true, 0, "socks connect tcp connection refused"))
+	if got := host.fileProxy(t, "idx-1"); got != "http://p2" {
+		t.Fatalf("file proxy = %q, want http://p2 after connection failure", got)
+	}
+}
+
+func TestZombieAccountThrottling(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "zombie.json", "idx-zombie", "Antigravity", "http://p1")
+	cfg := baseConfig(t, "http://p1", "http://p2")
+	engine := newTestEngine(t, cfg, host)
+
+	// Cause failures across all candidates:
+	// Failure 1: on p1 -> switches to p2
+	engine.HandleUsage(usage("idx-zombie", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-zombie"); got != "http://p2" {
+		t.Fatalf("want switched to p2, got %q", got)
+	}
+	// Failure 2: on p2 -> switches to p1
+	engine.HandleUsage(usage("idx-zombie", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-zombie"); got != "http://p1" {
+		t.Fatalf("want switched to p1, got %q", got)
+	}
+	// Failure 3: on p1 -> switches to p2
+	engine.HandleUsage(usage("idx-zombie", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-zombie"); got != "http://p2" {
+		t.Fatalf("want switched to p2, got %q", got)
+	}
+
+	// At failure 4: zeroSuccessFailures reaches 4 (len(candidates)*2).
+	// Rapid consecutive failure within 30 seconds triggers zombie throttling,
+	// keeping current proxy (p2) to protect disk I/O and prevent flapping.
+	engine.HandleUsage(usage("idx-zombie", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-zombie"); got != "http://p2" {
+		t.Fatalf("zombie switch should be throttled on failure 4, got %q", got)
+	}
+}
+
+func TestZombieAccountDoesNotThrottleUntriedCandidates(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "cred-z.json", "idx-z", "Antigravity", "")
+	cfg := baseConfig(t, "http://p1", "http://p2")
+	engine := newTestEngine(t, cfg, host)
+
+	now := time.Now().Unix()
+	for i := range 10 {
+		engine.RecordObservation("cred-z.json", "default", now-10+int64(i), false)
+	}
+	engine.RecordObservation("cred-z.json", "http://p1", now, false)
+
+	engine.mu.Lock()
+	st := engine.auths["cred-z.json"]
+	throttled := st.isThrottledZombie(cfg.Proxies, time.Now())
+	engine.mu.Unlock()
+
+	if throttled {
+		t.Fatal("should not throttle zombie while candidates (http://p2) remain untried")
+	}
+}
+
 func TestSuccessOnAppliedProxyDoesNotSwitch(t *testing.T) {
 	host := newHostStub()
 	host.addAuth(t, "cred.json", "idx-1", "Antigravity", "http://p1")

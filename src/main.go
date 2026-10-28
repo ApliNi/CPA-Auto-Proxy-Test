@@ -23,7 +23,7 @@ import (
 
 const pluginIdentifier = "cpa-auto-proxy-test"
 
-var pluginVersion = "0.1.3"
+var pluginVersion = "0.2.0"
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -181,6 +181,8 @@ func pluginRegistration(schemaVersion uint32) registration {
 				{Name: "proxies", Type: pluginapi.ConfigFieldTypeArray, Description: "Candidate proxy URLs, one full URL per entry."},
 				{Name: "failure-patterns", Type: pluginapi.ConfigFieldTypeArray, Description: "Failure matchers: regular expressions for the response body or plain numeric status codes (empty matches all failures)."},
 				{Name: "window-hours", Type: pluginapi.ConfigFieldTypeInteger, Description: "Length of the recent observation window in hours (default 24)."},
+				{Name: "min-recent-samples", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minimum recent observation samples required before recent success rate takes full weight (default 5)."},
+				{Name: "failure-cooldown-sec", Type: pluginapi.ConfigFieldTypeInteger, Description: "Base failure cooldown duration in seconds with exponential backoff on consecutive failures (default 15)."},
 			},
 		},
 		Capabilities: registrationCapability{

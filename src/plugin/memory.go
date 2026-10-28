@@ -61,31 +61,105 @@ func (s *proxyMemoryStats) windowStats(windowStart int64) scorer.Stats {
 	}
 }
 
+// globalProxyStats stores aggregated statistics and cooldown state for one proxy across all credentials.
+type globalProxyStats struct {
+	longSuccess         int64
+	longTotal           int64
+	consecutiveFailures int
+	cooldownUntil       time.Time
+}
+
 // authMemoryState stores the in-memory state and proxy statistics for one credential.
 type authMemoryState struct {
-	authID       string
-	currentProxy string
-	updatedAt    time.Time
-	stats        map[string]*proxyMemoryStats
+	authID              string
+	currentProxy        string
+	updatedAt           time.Time
+	lastSwitchAt        time.Time
+	zeroSuccessFailures int
+	consecutiveFailures map[string]int
+	cooldownUntil       map[string]time.Time
+	stats               map[string]*proxyMemoryStats
 }
 
 func newAuthMemoryState(authID string) *authMemoryState {
 	return &authMemoryState{
-		authID: authID,
-		stats:  make(map[string]*proxyMemoryStats),
+		authID:              authID,
+		consecutiveFailures: make(map[string]int),
+		cooldownUntil:       make(map[string]time.Time),
+		stats:               make(map[string]*proxyMemoryStats),
 	}
 }
 
-func (a *authMemoryState) record(proxy string, ts int64, ok bool) {
+func (a *authMemoryState) record(proxy string, ts int64, ok bool, baseCooldown time.Duration) {
 	st, exists := a.stats[proxy]
 	if !exists {
 		st = &proxyMemoryStats{}
 		a.stats[proxy] = st
 	}
 	st.record(ts, ok)
+
+	if ok {
+		a.consecutiveFailures[proxy] = 0
+		delete(a.cooldownUntil, proxy)
+		a.zeroSuccessFailures = 0
+	} else {
+		a.consecutiveFailures[proxy]++
+		shift := a.consecutiveFailures[proxy] - 1
+		if shift > 5 {
+			shift = 5
+		}
+		if baseCooldown <= 0 {
+			baseCooldown = 15 * time.Second
+		}
+		cd := baseCooldown * time.Duration(1<<shift)
+		if cd > 10*time.Minute {
+			cd = 10 * time.Minute
+		}
+		a.cooldownUntil[proxy] = time.Unix(ts, 0).Add(cd)
+		a.zeroSuccessFailures++
+	}
+}
+
+func (a *authMemoryState) cooldowns(now time.Time) map[string]time.Time {
+	if a == nil {
+		return nil
+	}
+	out := make(map[string]time.Time, len(a.cooldownUntil))
+	for p, cd := range a.cooldownUntil {
+		if now.Before(cd) {
+			out[p] = cd
+		}
+	}
+	return out
+}
+
+func (a *authMemoryState) isThrottledZombie(candidates []string, now time.Time) bool {
+	if a == nil || len(candidates) == 0 {
+		return false
+	}
+	var totalSuccess int64
+	for _, st := range a.stats {
+		totalSuccess += st.longSuccess
+	}
+	if totalSuccess > 0 {
+		return false
+	}
+	for _, p := range candidates {
+		st, ok := a.stats[p]
+		if !ok || st.longTotal == 0 {
+			return false
+		}
+	}
+	if a.zeroSuccessFailures < len(candidates)*2 {
+		return false
+	}
+	return !a.lastSwitchAt.IsZero() && now.Sub(a.lastSwitchAt) < 30*time.Second
 }
 
 func (a *authMemoryState) allStats(windowStart int64) map[string]scorer.Stats {
+	if a == nil {
+		return map[string]scorer.Stats{}
+	}
 	out := make(map[string]scorer.Stats, len(a.stats))
 	for p, st := range a.stats {
 		out[p] = st.windowStats(windowStart)
@@ -94,6 +168,9 @@ func (a *authMemoryState) allStats(windowStart int64) map[string]scorer.Stats {
 }
 
 func (a *authMemoryState) triedProxies() map[string]bool {
+	if a == nil {
+		return map[string]bool{}
+	}
 	out := make(map[string]bool, len(a.stats))
 	for p, st := range a.stats {
 		if st.longTotal > 0 {
@@ -139,6 +216,7 @@ func (b *failureBuffer) Add(rec FailureRecord) {
 	}
 	b.records = append(b.records, rec)
 }
+
 func (b *failureBuffer) Snapshot(limit int) []FailureRecord {
 	if b == nil {
 		return nil

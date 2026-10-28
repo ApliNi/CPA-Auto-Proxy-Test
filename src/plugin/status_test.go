@@ -122,7 +122,7 @@ func TestStatusSnapshotFields(t *testing.T) {
 	if p1obs.RecentSuccess != 1 || p1obs.RecentTotal != 2 || p1obs.LongSuccess != 2 || p1obs.LongTotal != 3 {
 		t.Fatalf("p1 stats = %+v", p1obs)
 	}
-	want := scorer.Score(scorer.Stats{RecentSuccess: 1, RecentTotal: 2, LongSuccess: 2, LongTotal: 3})
+	want := scorer.ScoreWithPrior(scorer.Stats{RecentSuccess: 1, RecentTotal: 2, LongSuccess: 2, LongTotal: 3}, 3.0/5.0, 5)
 	if p1obs.Score != want {
 		t.Fatalf("p1 score = %v, want %v", p1obs.Score, want)
 	}
@@ -352,6 +352,7 @@ func TestStatusPageHTMLContract(t *testing.T) {
 		}
 	}
 }
+
 func TestNotConfiguredHTMLContent(t *testing.T) {
 	page := NotConfiguredHTML()
 	if !strings.Contains(page, "cpa-auto-proxy-test") || !strings.Contains(page, "插件尚未加载配置") {
@@ -382,6 +383,7 @@ func TestManagementResponseBuilders(t *testing.T) {
 		t.Errorf("HtmlManagementResponse Body = %q, want <html>test</html>", string(htmlResp.Body))
 	}
 }
+
 func TestProxySummariesMultiAccountAggregation(t *testing.T) {
 	host := newHostStub()
 	host.addAuth(t, "acc1.json", "idx-1", "Antigravity", "")

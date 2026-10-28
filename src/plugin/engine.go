@@ -50,6 +50,7 @@ type Engine struct {
 	match        *matcher.Matcher
 	host         HostAPI
 	auths        map[string]*authMemoryState
+	globalStats  map[string]*globalProxyStats
 	failures     *failureBuffer
 	cleanup      time.Time
 	authList     []AuthEntry
@@ -68,13 +69,14 @@ func New(cfg config.Config, host HostAPI) (*Engine, error) {
 		return nil, errCompile
 	}
 	engine := &Engine{
-		cfg:      cfg,
-		match:    match,
-		host:     host,
-		auths:    make(map[string]*authMemoryState),
-		failures: newFailureBuffer(),
-		events:   newEventBuffer(),
-		stop:     make(chan struct{}),
+		cfg:         cfg,
+		match:       match,
+		host:        host,
+		auths:       make(map[string]*authMemoryState),
+		globalStats: make(map[string]*globalProxyStats),
+		failures:    newFailureBuffer(),
+		events:      newEventBuffer(),
+		stop:        make(chan struct{}),
 	}
 	// Initial cleanup and sync: scan credentials, purge obsolete proxies
 	// not in the active configuration, and warm up memory state.
@@ -172,9 +174,12 @@ func (e *Engine) HandleUsage(record pluginapi.UsageRecord) {
 	if observed == "" {
 		observed = scorer.DefaultProxy
 	}
-	st.record(observed, now.Unix(), ok)
+	baseCooldown := time.Duration(cfg.FailureCooldownSec) * time.Second
+	st.record(observed, now.Unix(), ok, baseCooldown)
+	e.recordGlobalObservationLocked(observed, now, ok, baseCooldown)
 
 	shouldSwitch := !ok
+	isFailure := !ok
 	if ok && current == "" && hasAuthInfo && len(cfg.Proxies) > 0 {
 		// 全局默认状态下首次成功：立刻分配并绑定最佳代理
 		shouldSwitch = true
@@ -185,7 +190,7 @@ func (e *Engine) HandleUsage(record pluginapi.UsageRecord) {
 		return
 	}
 
-	selected, errSwitch := e.switchProxyLocked(authID, path, st, cfg)
+	selected, errSwitch := e.switchProxyLocked(authID, path, st, cfg, isFailure, observed)
 	e.mu.Unlock()
 
 	if errSwitch != nil {
@@ -234,11 +239,16 @@ func (e *Engine) resolveAuthInfo(record pluginapi.UsageRecord) (authID string, a
 // switchProxyLocked picks the best proxy according to historical scores,
 // writes it to the physical auth file, and updates memory state.
 // Must be called with e.mu held.
-func (e *Engine) switchProxyLocked(authID string, path string, st *authMemoryState, cfg config.Config) (string, error) {
+func (e *Engine) switchProxyLocked(authID string, path string, st *authMemoryState, cfg config.Config, isFailure bool, failedProxy string) (string, error) {
 	if len(cfg.Proxies) == 0 {
 		return "", nil
 	}
-	windowStart := time.Now().Add(-time.Duration(cfg.WindowHours) * time.Hour).Unix()
+	now := time.Now()
+	if isFailure && st.isThrottledZombie(cfg.Proxies, now) {
+		return st.currentProxy, nil
+	}
+
+	windowStart := now.Add(-time.Duration(cfg.WindowHours) * time.Hour).Unix()
 	stats := st.allStats(windowStart)
 	tried := st.triedProxies()
 	current := st.currentProxy
@@ -246,7 +256,33 @@ func (e *Engine) switchProxyLocked(authID string, path string, st *authMemorySta
 		current = scorer.DefaultProxy
 	}
 
-	selected := scorer.Select(cfg.Proxies, untriedSet(cfg.Proxies, tried), current, stats)
+	cooldowns := st.cooldowns(now)
+	for p, gs := range e.globalStats {
+		if now.Before(gs.cooldownUntil) {
+			if existing, ok := cooldowns[p]; !ok || gs.cooldownUntil.After(existing) {
+				cooldowns[p] = gs.cooldownUntil
+			}
+		}
+	}
+
+	opts := scorer.SelectOptions{
+		Candidates:       cfg.Proxies,
+		Untried:          untriedSet(cfg.Proxies, tried),
+		Current:          current,
+		Stats:            stats,
+		Cooldowns:        cooldowns,
+		GlobalPriors:     e.globalPriorsLocked(cfg.Proxies),
+		MinRecentSamples: cfg.MinRecentSamples,
+		Now:              now,
+	}
+	if isFailure {
+		opts.Exclude = failedProxy
+		if opts.Exclude == "" {
+			opts.Exclude = current
+		}
+	}
+
+	selected := scorer.SelectCandidate(opts)
 	if selected == "" || selected == current {
 		return current, nil
 	}
@@ -258,7 +294,8 @@ func (e *Engine) switchProxyLocked(authID string, path string, st *authMemorySta
 	}
 
 	st.currentProxy = selected
-	st.updatedAt = time.Now()
+	st.updatedAt = now
+	st.lastSwitchAt = now
 
 	e.host.Log("info", fmt.Sprintf("cpa-auto-proxy-test: switched %s to %s", authID, selected), map[string]any{
 		"auth_id": authID,
@@ -266,13 +303,60 @@ func (e *Engine) switchProxyLocked(authID string, path string, st *authMemorySta
 		"from":    current,
 	})
 	e.events.Add(Event{
-		TS:      time.Now().Unix(),
+		TS:      now.Unix(),
 		Level:   "info",
 		Kind:    "switch",
 		AuthID:  authID,
 		Message: fmt.Sprintf("switched proxy from %s to %s", current, selected),
 	})
 	return selected, nil
+}
+
+func (e *Engine) recordGlobalObservationLocked(proxy string, now time.Time, ok bool, baseCooldown time.Duration) {
+	if proxy == "" || proxy == scorer.DefaultProxy {
+		return
+	}
+	if e.globalStats == nil {
+		e.globalStats = make(map[string]*globalProxyStats)
+	}
+	gs, exists := e.globalStats[proxy]
+	if !exists {
+		gs = &globalProxyStats{}
+		e.globalStats[proxy] = gs
+	}
+	gs.longTotal++
+	if ok {
+		gs.longSuccess++
+		gs.consecutiveFailures = 0
+		gs.cooldownUntil = time.Time{}
+	} else {
+		gs.consecutiveFailures++
+		shift := gs.consecutiveFailures - 1
+		if shift > 5 {
+			shift = 5
+		}
+		if baseCooldown <= 0 {
+			baseCooldown = 15 * time.Second
+		}
+		cd := baseCooldown * time.Duration(1<<shift)
+		if cd > 10*time.Minute {
+			cd = 10 * time.Minute
+		}
+		gs.cooldownUntil = now.Add(cd)
+	}
+}
+
+func (e *Engine) globalPriorsLocked(candidates []string) map[string]float64 {
+	priors := make(map[string]float64, len(candidates))
+	for _, p := range candidates {
+		gs, exists := e.globalStats[p]
+		if !exists || gs.longTotal == 0 {
+			priors[p] = scorer.DefaultPrior
+			continue
+		}
+		priors[p] = float64(gs.longSuccess+1) / float64(gs.longTotal+2)
+	}
+	return priors
 }
 
 func untriedSet(candidates []string, tried map[string]bool) map[string]bool {
@@ -479,7 +563,9 @@ func (e *Engine) RecordObservation(authID, proxy string, ts int64, ok bool) {
 		st = newAuthMemoryState(authID)
 		e.auths[authID] = st
 	}
-	st.record(proxy, ts, ok)
+	baseCooldown := time.Duration(e.cfg.FailureCooldownSec) * time.Second
+	st.record(proxy, ts, ok, baseCooldown)
+	e.recordGlobalObservationLocked(proxy, time.Unix(ts, 0), ok, baseCooldown)
 }
 
 // SetAuthState sets the in-memory currentProxy for an authID.
