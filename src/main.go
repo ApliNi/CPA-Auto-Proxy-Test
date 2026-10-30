@@ -23,7 +23,7 @@ import (
 
 const pluginIdentifier = "cpa-auto-proxy-test"
 
-var pluginVersion = "0.2.0"
+var pluginVersion = "0.2.1"
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -183,6 +183,7 @@ func pluginRegistration(schemaVersion uint32) registration {
 				{Name: "window-hours", Type: pluginapi.ConfigFieldTypeInteger, Description: "Length of the recent observation window in hours (default 24)."},
 				{Name: "min-recent-samples", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minimum recent observation samples required before recent success rate takes full weight (default 5)."},
 				{Name: "failure-cooldown-sec", Type: pluginapi.ConfigFieldTypeInteger, Description: "Base failure cooldown duration in seconds with exponential backoff on consecutive failures (default 15)."},
+				{Name: "switch-debounce-sec", Type: pluginapi.ConfigFieldTypeInteger, Description: "Switch debounce and in-flight failure isolation window in seconds to suppress rapid secondary switches and protect new proxy stats (default 10)."},
 			},
 		},
 		Capabilities: registrationCapability{

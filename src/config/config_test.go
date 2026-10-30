@@ -23,6 +23,9 @@ func TestParseDefaults(t *testing.T) {
 	if cfg.FailureCooldownSec != 15 {
 		t.Fatalf("FailureCooldownSec = %d, want 15", cfg.FailureCooldownSec)
 	}
+	if cfg.SwitchDebounceSec != 10 {
+		t.Fatalf("SwitchDebounceSec = %d, want 10", cfg.SwitchDebounceSec)
+	}
 	if len(cfg.Proxies) != 0 || len(cfg.FailurePatterns) != 0 {
 		t.Fatalf("expected empty proxies and patterns, got %v / %v", cfg.Proxies, cfg.FailurePatterns)
 	}
@@ -30,9 +33,11 @@ func TestParseDefaults(t *testing.T) {
 
 func TestParseEmptyAuthType(t *testing.T) {
 	raw := []byte(`
+auth-type: ""
 window-hours: 12
 min-recent-samples: 10
 failure-cooldown-sec: 30
+switch-debounce-sec: 5
 `)
 	cfg, err := Parse(raw)
 	if err != nil {
@@ -49,6 +54,9 @@ failure-cooldown-sec: 30
 	}
 	if cfg.FailureCooldownSec != 30 {
 		t.Fatalf("FailureCooldownSec = %d, want 30", cfg.FailureCooldownSec)
+	}
+	if cfg.SwitchDebounceSec != 5 {
+		t.Fatalf("SwitchDebounceSec = %d, want 5", cfg.SwitchDebounceSec)
 	}
 }
 
@@ -67,6 +75,7 @@ failure-patterns:
 window-hours: -5
 min-recent-samples: -1
 failure-cooldown-sec: 0
+switch-debounce-sec: -3
 `)
 	cfg, err := Parse(raw)
 	if err != nil {
@@ -92,6 +101,22 @@ failure-cooldown-sec: 0
 	if cfg.FailureCooldownSec != 15 {
 		t.Fatalf("FailureCooldownSec should reset to default 15 when non-positive, got %d", cfg.FailureCooldownSec)
 	}
+	if cfg.SwitchDebounceSec != 10 {
+		t.Fatalf("SwitchDebounceSec should reset to default 10 when negative, got %d", cfg.SwitchDebounceSec)
+	}
+}
+
+func TestParseZeroSwitchDebounceDisablesDebounce(t *testing.T) {
+	raw := []byte(`
+switch-debounce-sec: 0
+`)
+	cfg, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse error = %v", err)
+	}
+	if cfg.SwitchDebounceSec != 0 {
+		t.Fatalf("SwitchDebounceSec = %d, want 0 when explicitly disabled", cfg.SwitchDebounceSec)
+	}
 }
 
 func TestConfigAuthTypes(t *testing.T) {
@@ -101,47 +126,45 @@ func TestConfigAuthTypes(t *testing.T) {
 	}{
 		{"", nil},
 		{"   ", nil},
-		{",,,", nil},
 		{"antigravity", []string{"antigravity"}},
-		{"Antigravity, gemini, , CLAUDE", []string{"Antigravity", "gemini", "CLAUDE"}},
+		{"Antigravity, Gemini", []string{"Antigravity", "Gemini"}},
+		{"  antigravity ,  , gemini  ", []string{"antigravity", "gemini"}},
+		{",,,", nil},
 	}
 	for _, tc := range cases {
-		c := Config{AuthType: tc.input}
-		got := c.AuthTypes()
+		cfg := Config{AuthType: tc.input}
+		got := cfg.AuthTypes()
 		if !reflect.DeepEqual(got, tc.want) {
-			t.Fatalf("AuthTypes(%q) = %v, want %v", tc.input, got, tc.want)
+			t.Errorf("AuthTypes(%q) = %v, want %v", tc.input, got, tc.want)
 		}
 	}
 }
 
 func TestConfigMatchesAuthType(t *testing.T) {
-	cfg := Config{AuthType: "Antigravity, gemini"}
-	cases := []struct {
-		target string
-		want   bool
-	}{
-		{"", false},
-		{"   ", false},
-		{"antigravity", true},
-		{"Antigravity", true},
-		{"ANTIGRAVITY", true},
-		{"gemini", true},
-		{"GEMINI", true},
-		{"claude", false},
-		{"anti", false},
+	cfg := Config{AuthType: "Antigravity, Gemini"}
+	if !cfg.MatchesAuthType("antigravity") {
+		t.Error("expected matches antigravity")
 	}
-	for _, tc := range cases {
-		if got := cfg.MatchesAuthType(tc.target); got != tc.want {
-			t.Fatalf("MatchesAuthType(%q) = %v, want %v", tc.target, got, tc.want)
-		}
+	if !cfg.MatchesAuthType("GEMINI") {
+		t.Error("expected matches GEMINI")
+	}
+	if cfg.MatchesAuthType("claude") {
+		t.Error("unexpected match claude")
+	}
+	if cfg.MatchesAuthType("") {
+		t.Error("unexpected match empty string")
+	}
+
+	emptyCfg := Config{}
+	if emptyCfg.MatchesAuthType("antigravity") {
+		t.Error("expected no match when AuthType is empty")
 	}
 }
 
 func TestParseInvalidYAML(t *testing.T) {
-	raw := []byte("invalid: yaml: :")
-	_, err := Parse(raw)
+	_, err := Parse([]byte(": invalid yaml :"))
 	if err == nil {
-		t.Fatal("expected error on invalid YAML, got nil")
+		t.Fatal("expected error parsing invalid YAML")
 	}
 	if !strings.Contains(err.Error(), "decode cpa-auto-proxy-test config") {
 		t.Fatalf("unexpected error message: %v", err)

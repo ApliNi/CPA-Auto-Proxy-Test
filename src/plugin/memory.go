@@ -73,6 +73,7 @@ type globalProxyStats struct {
 type authMemoryState struct {
 	authID              string
 	currentProxy        string
+	previousProxy       string
 	updatedAt           time.Time
 	lastSwitchAt        time.Time
 	zeroSuccessFailures int
@@ -131,6 +132,13 @@ func (a *authMemoryState) cooldowns(now time.Time) map[string]time.Time {
 		}
 	}
 	return out
+}
+
+func (a *authMemoryState) isInSwitchDebounce(now time.Time, window time.Duration) bool {
+	if a == nil || window <= 0 || a.lastSwitchAt.IsZero() {
+		return false
+	}
+	return now.Sub(a.lastSwitchAt) < window
 }
 
 func (a *authMemoryState) isThrottledZombie(candidates []string, now time.Time) bool {

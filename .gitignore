@@ -8,3 +8,4 @@ data/*.db-wal
 .pi-temp/
 build/
 .pi-temp/
+*.o

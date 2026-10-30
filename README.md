@@ -15,6 +15,7 @@ CLIProxyAPI 插件：自动识别并将不同认证文件的流量路由到可�
 3. **故障敏捷熔断与避障切换**：
    - 严禁原地死锁：节点故障触发切换时强制排除当前故障节点，保障流量立即故障转移（Failover）。
    - 指数退避冷却：节点发生故障时自动触发冷却倒计时（默认 15s 起步，随连续故障呈指数递增），冷却期内优先将流量调度至健康节点。
+   - 切换防抖与在途失败隔离：为每个凭证维护切换防抖窗口（默认 10 秒）。切换代理后在此时间窗口内压制凭证频繁二次切换，并将延迟到达的在途并发失败正确归因于原代理，防止误扣新代理评分并彻底杜绝并发故障下的循环刷盘风暴。
    - 僵尸凭证限频：对全节点彻底不可用的失效凭证自动限频写盘，保护宿主磁盘 I/O 与文件监听器免受刷盘风暴影响。
 4. **热更新生效与内存自愈**：仅修改对应凭证 JSON 文件的 `proxy_url` 字段（原子写，不破坏 token 刷新），CPA watcher 自动热加载生效；纯内存维护评分与状态，正常请求零磁盘 I/O；启动与配置重载时自动从凭证文件中清理已废弃或移除的坏代理。
 
@@ -40,6 +41,7 @@ plugins:
       window-hours: 24
       min-recent-samples: 5
       failure-cooldown-sec: 15
+      switch-debounce-sec: 10
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -50,6 +52,7 @@ plugins:
 | `window-hours` | int | `24` | 近期成功率的滑动统计窗口（小时） |
 | `min-recent-samples` | int | `5` | 近期窗口置信度最小样本量，低于此值平滑结合长期指标与全局经验先验 |
 | `failure-cooldown-sec` | int | `15` | 故障节点基础冷却时长（秒），连续故障时指数递增退避 |
+| `switch-debounce-sec` | int | `10` | 账号级切换防抖与在途失败隔离窗口（秒），在此窗口内压制二次切换并隔离在途失败 |
 
 ---
 
@@ -95,7 +98,7 @@ plugins:
 go run build.go
 
 # 常用参数：
-go run build.go -version 0.2.0              # 指定 Release 版本号（默认 0.2.0）
+go run build.go -version 0.2.1              # 指定 Release 版本号（默认 0.2.1）
 go run build.go -target windows/amd64        # 单独构建指定目标平台（支持 windows/amd64, windows/arm64, linux/amd64, linux/arm64, darwin/amd64, darwin/arm64）
 go run build.go -target darwin/arm64 -keep  # 单独构建并保留 build/ 目录下已有产物
 go run build.go -no-wsl                      # 禁用 Windows 下自动回退到 WSL 构建
@@ -103,5 +106,5 @@ go run build.go -no-wsl                      # 禁用 Windows 下自动回退到
 
 ### 安装与发布
 
-- **发布到 GitHub Release**：直接将 `build/` 下的 `.zip` 压缩包（如 `cpa-auto-proxy-test_0.2.0_linux_amd64.zip`）和 `checksums.txt` 上传至 GitHub Release 附件即可。
+- **发布到 GitHub Release**：直接将 `build/` 下的 `.zip` 压缩包（如 `cpa-auto-proxy-test_0.2.1_linux_amd64.zip`）和 `checksums.txt` 上传至 GitHub Release 附件即可。
 - **手动安装**：解压对应平台的动态库文件（Windows: `cpa-auto-proxy-test.dll`、Linux: `cpa-auto-proxy-test.so`、macOS: `cpa-auto-proxy-test.dylib`）放入 CPA 的 `plugins/` 目录，配置好 CPA 主配置中的插件段即可。

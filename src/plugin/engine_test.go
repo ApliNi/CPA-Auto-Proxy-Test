@@ -263,6 +263,7 @@ func TestZombieAccountThrottling(t *testing.T) {
 	host := newHostStub()
 	host.addAuth(t, "zombie.json", "idx-zombie", "Antigravity", "http://p1")
 	cfg := baseConfig(t, "http://p1", "http://p2")
+	cfg.SwitchDebounceSec = 0 // disable debounce to isolate zombie throttling logic
 	engine := newTestEngine(t, cfg, host)
 
 	// Cause failures across all candidates:
@@ -510,5 +511,93 @@ func TestCleanupStaleProxiesDefaultEmptyAndMulti(t *testing.T) {
 	}
 	if got := host.fileProxy(t, "idx-3"); got != "http://stale:8080" {
 		t.Fatalf("idx-3 proxy = %q, want untouched http://stale:8080", got)
+	}
+}
+
+
+func TestSwitchDebounceAndInFlightIsolation(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "debounce.json", "idx-deb", "Antigravity", "http://p1")
+	cfg := baseConfig(t, "http://p1", "http://p2", "http://p3")
+	cfg.SwitchDebounceSec = 10
+	engine := newTestEngine(t, cfg, host)
+
+	// Failure 1 on p1: switches from p1 to p2
+	engine.HandleUsage(usage("idx-deb", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-deb"); got != "http://p2" {
+		t.Fatalf("first failure should switch to p2, got %q", got)
+	}
+
+	// Failure 2 arrives immediately (simulating concurrent in-flight request started on p1)
+	engine.HandleUsage(usage("idx-deb", true, 400, "User location is not supported"))
+	// 1. Debounce check: file proxy MUST remain p2 (no rapid flapping to p3)
+	if got := host.fileProxy(t, "idx-deb"); got != "http://p2" {
+		t.Fatalf("second rapid failure should be debounced, got %q", got)
+	}
+
+	// 2. In-flight failure isolation: failure 2 must be attributed to p1, not p2
+	stats := engine.AuthStats("cred-idx-deb", 0)
+	p1Stats := stats["http://p1"]
+	p2Stats := stats["http://p2"]
+
+	if p1Stats.LongTotal != 2 || p1Stats.LongSuccess != 0 {
+		t.Fatalf("p1 should have 2 failures recorded from in-flight isolation, got %+v", p1Stats)
+	}
+	if p2Stats.LongTotal != 0 {
+		t.Fatalf("p2 should have 0 failures recorded (protected by isolation), got %+v", p2Stats)
+	}
+
+	// 3. Cooldown check: p2 should NOT be in cooldown
+	engine.mu.Lock()
+	st := engine.auths["cred-idx-deb"]
+	cooldowns := st.cooldowns(time.Now())
+	engine.mu.Unlock()
+	if _, isCooling := cooldowns["http://p2"]; isCooling {
+		t.Fatal("p2 should not be placed into cooldown by in-flight failure")
+	}
+
+	// 4. FailureRecord check: recent failure should record Proxy: p1, SwitchedTo: p2
+	failures := engine.failures.Snapshot(1)
+	if len(failures) == 0 {
+		t.Fatal("expected failure record to be logged")
+	}
+	if failures[0].Proxy != "http://p1" || failures[0].SwitchedTo != "http://p2" {
+		t.Fatalf("failure record = %+v, want Proxy=http://p1, SwitchedTo=http://p2", failures[0])
+	}
+}
+
+func TestSwitchDebouncePermitsSwitchAfterWindow(t *testing.T) {
+	host := newHostStub()
+	host.addAuth(t, "window.json", "idx-win", "Antigravity", "http://p1")
+	cfg := baseConfig(t, "http://p1", "http://p2", "http://p3")
+	cfg.SwitchDebounceSec = 10
+	engine := newTestEngine(t, cfg, host)
+
+	// Failure 1 on p1: switches from p1 to p2
+	engine.HandleUsage(usage("idx-win", true, 400, "User location is not supported"))
+	if got := host.fileProxy(t, "idx-win"); got != "http://p2" {
+		t.Fatalf("first failure should switch to p2, got %q", got)
+	}
+
+	// Fast-forward lastSwitchAt outside the debounce window
+	engine.mu.Lock()
+	st := engine.auths["cred-idx-win"]
+	st.lastSwitchAt = time.Now().Add(-15 * time.Second)
+	engine.mu.Unlock()
+
+	// New failure arrives after debounce window: this failure genuinely belongs to p2
+	engine.HandleUsage(usage("idx-win", true, 400, "User location is not supported"))
+	// It should now successfully switch away from p2 (to p3 or another healthy candidate)
+	got := host.fileProxy(t, "idx-win")
+	if got == "http://p2" {
+		t.Fatalf("failure after debounce window should switch away from p2, but stayed on %q", got)
+	}
+	if got != "http://p3" {
+		t.Fatalf("want switched to p3, got %q", got)
+	}
+
+	stats := engine.AuthStats("cred-idx-win", 0)
+	if stats["http://p2"].LongTotal != 1 {
+		t.Fatalf("p2 should have 1 failure recorded after debounce window, got %+v", stats["http://p2"])
 	}
 }

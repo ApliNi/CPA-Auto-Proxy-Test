@@ -13,7 +13,7 @@
 //	go run build.go
 //	go run build.go -target windows/amd64
 //	go run build.go -target windows/amd64 -keep
-//	go run build.go -version 0.2.0
+//	go run build.go -version 0.2.1
 //	go run build.go -no-wsl
 package main
 
@@ -588,7 +588,7 @@ func fatal(err error) {
 
 func main() {
 	pluginID := "cpa-auto-proxy-test"
-	defaultVersion := "0.2.0"
+	defaultVersion := "0.2.1"
 
 	targetFlag := flag.String("target", "all", "target to build (goos/goarch), or \"all\"")
 	versionFlag := flag.String("version", defaultVersion, "plugin release version (without leading v, e.g. 0.1.0)")

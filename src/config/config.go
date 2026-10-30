@@ -14,6 +14,7 @@ const (
 	DefaultWindowHours        = 24
 	DefaultMinRecentSamples   = 5
 	DefaultFailureCooldownSec = 15
+	DefaultSwitchDebounceSec  = 10
 )
 
 // Config holds the cpa-auto-proxy-test plugin settings.
@@ -35,6 +36,9 @@ type Config struct {
 	// FailureCooldownSec is the base cooldown duration in seconds applied to a proxy
 	// after a matching failure, with exponential backoff on consecutive failures (defaults to 15).
 	FailureCooldownSec int `yaml:"failure-cooldown-sec"`
+	// SwitchDebounceSec is the duration in seconds to suppress rapid subsequent
+	// proxy switches for the same credential and isolate in-flight failure observations (defaults to 10).
+	SwitchDebounceSec int `yaml:"switch-debounce-sec"`
 }
 
 // Default returns the built-in default configuration.
@@ -44,6 +48,7 @@ func Default() Config {
 		WindowHours:        DefaultWindowHours,
 		MinRecentSamples:   DefaultMinRecentSamples,
 		FailureCooldownSec: DefaultFailureCooldownSec,
+		SwitchDebounceSec:  DefaultSwitchDebounceSec,
 	}
 }
 
@@ -123,6 +128,9 @@ func Parse(raw []byte) (Config, error) {
 	}
 	if cfg.FailureCooldownSec <= 0 {
 		cfg.FailureCooldownSec = DefaultFailureCooldownSec
+	}
+	if cfg.SwitchDebounceSec < 0 {
+		cfg.SwitchDebounceSec = DefaultSwitchDebounceSec
 	}
 	return cfg, nil
 }

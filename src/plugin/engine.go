@@ -175,10 +175,19 @@ func (e *Engine) HandleUsage(record pluginapi.UsageRecord) {
 		observed = scorer.DefaultProxy
 	}
 	baseCooldown := time.Duration(cfg.FailureCooldownSec) * time.Second
+	debounceWindow := time.Duration(cfg.SwitchDebounceSec) * time.Second
+
+	inDebounce := !ok && st.isInSwitchDebounce(now, debounceWindow)
+	if inDebounce && st.previousProxy != "" && st.previousProxy != scorer.DefaultProxy {
+		// 在途请求失败隔离: 切换防抖窗口内返回的失败归因于切换前实际在途使用的前序代理，
+		// 避免新代理被误扣成功率或打入故障冷却
+		observed = st.previousProxy
+	}
+
 	st.record(observed, now.Unix(), ok, baseCooldown)
 	e.recordGlobalObservationLocked(observed, now, ok, baseCooldown)
 
-	shouldSwitch := !ok
+	shouldSwitch := !ok && !inDebounce
 	isFailure := !ok
 	if ok && current == "" && hasAuthInfo && len(cfg.Proxies) > 0 {
 		// 全局默认状态下首次成功：立刻分配并绑定最佳代理
@@ -187,6 +196,16 @@ func (e *Engine) HandleUsage(record pluginapi.UsageRecord) {
 
 	if !shouldSwitch {
 		e.mu.Unlock()
+		if !ok {
+			e.failures.Add(FailureRecord{
+				TS:           now.Unix(),
+				AuthID:       authID,
+				Proxy:        observed,
+				StatusCode:   record.Failure.StatusCode,
+				ErrorSnippet: truncateSnippet(record.Failure.Body, 512),
+				SwitchedTo:   current,
+			})
+		}
 		return
 	}
 
@@ -244,6 +263,10 @@ func (e *Engine) switchProxyLocked(authID string, path string, st *authMemorySta
 		return "", nil
 	}
 	now := time.Now()
+	debounceWindow := time.Duration(cfg.SwitchDebounceSec) * time.Second
+	if isFailure && st.isInSwitchDebounce(now, debounceWindow) {
+		return st.currentProxy, nil
+	}
 	if isFailure && st.isThrottledZombie(cfg.Proxies, now) {
 		return st.currentProxy, nil
 	}
@@ -293,6 +316,7 @@ func (e *Engine) switchProxyLocked(authID string, path string, st *authMemorySta
 		}
 	}
 
+	st.previousProxy = current
 	st.currentProxy = selected
 	st.updatedAt = now
 	st.lastSwitchAt = now
